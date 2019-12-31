@@ -1,0 +1,1408 @@
+#!/usr/bin/env bash
+
+# WIMF (What's In My Food) v1.0
+# Olivier Emery 08/2019
+# Digital Epidemiology Lab (EPFL), Campus Biotech Geneva
+# Under Creative commons 4.0 Licence: https://creativecommons.org/licenses/by/4.0/
+
+# BASIC USAGE: wimf -i SequencingRunFolderPath
+
+# PLEASE SEE FULL UPDATED DOCUMENTATION at https://github.com/salathegroup/Food-Repo-DNA-analysis/WIMF_v1
+
+# get help with the command:
+# wimf -h
+#
+# IMPORTANT NOTES: You may need to make this script executable with the following command: chmod u+x wimf
+#                  WIMF comes with a BLAST nucleotide database of ~1'000'000 sequences (1.4Gb) so you need to have that free space available on your hard drive. 
+#		   Once installed, WIMF will need to have sufficient space on your hard drive for temporary files (2-3 times the space used by demultiplexed reads should be fine)
+#		   Do not place any other FASTQ files in the barcode folders than the demultiplexed ones from the MinIon (otherwise they will also be concatenated and used in the analysis)
+#
+# TO BE INSTALLED BEFORE WIMF:
+#                  NanoPlot https://github.com/wdecoster/NanoPlot
+#	           Porechop https://github.com/rrwick/Porechop
+#                  NanoFilt https://github.com/wdecoster/nanofilt 
+#                  SeekDeep https://github.com/bailey-lab/SeekDeep (version 2.6.5 was used)
+#                  NCBI BLAST+ (version 2.9.0+ was used see https://www.ncbi.nlm.nih.gov/books/NBK1762/ )
+#
+# Developped and tested on Linux (Ubuntu  14.04 LTS 64bit), hardware: Intel® Core™ i7-4600U CPU @ 2.10GHz × 4, 8Gb RAM
+#		   
+# GLOBAL DESCRIPTION: 
+#
+# WIMF is an experimental automated pipeline to determine which plants and animals are present based on DNA sequences from food samples sequenced with the MinIon instrument (Oxford Nanopore Technologies).
+# Before sequencing, two specific genomic sequences present in all plants and, respectively, all animals are amplified via PCR from each sample, these are:
+# 1) a portion of the Ribulose-1,5-bisphosphate carboxylase/oxygenase large subunit ("rubisco") rbcL gene for plants 
+#    (using the following primer pair: Forward: TTT CTG TTG GTG CTG ATA TTG CAT GTC ACC ACA A and Reverse: ACT TGC CTG TCG CTC TAT CTT CTA GCA TCG YCC T). 
+# 2) a portion of the mitochondrial 16S rRNA for animals 
+#    (using the following primer pair: Forward: TTT CTG TTG GTG CTG ATA TTG CGM CTG TTT MCC and Reverse: ACT TGC CTG TCG CTC TAT CTT CYT CCA YAG GGT). 
+# The resulting amplified sequences (i.e. "amplicons") have an expected size ranging from 250 to 390bp. Samples are barcoded so that multiple samples can be sequenced simultaneously on a single
+# sequencing run using a single flow cell and separated (i.e. "demultiplexed) per sample afterwards.
+# WIMF takes as input demultiplexed sequencing data in FASTQ format as delivered by the MinIon standard software suite, with one folder per sequencing run containing several folders (the later with 
+# names starting with "BC" - for "Barcode" - containing all reads from one sample). For each sample, all reads are first gathered in a single FASTQ file that undergoes the process underlied in the "Main
+# steps" section described below. 
+#
+
+# DISCLAIMER: 
+# The WIMF (What's In My Food) pipeline is provided "as is" and "with all faults." It is not affiliated with the WIMP (What's In My Pot) pipeline neither with Oxford Nanopore Technologies.
+# The author makes no representations or warranties of any kind concerning the safety, suitability, lack of viruses, inaccuracies, typographical errors, or other potentially harmful components of WIMF. 
+# There are inherent dangers in the use of any software, and you are solely responsible for determining whether WIMF and its components are compatible with your equipment and other software installed 
+# on your equipment. You are also solely responsible for the protection of your equipment and backup of your data, and the author will not be liable for any damages you may suffer in connection with 
+# using, modifying, or distributing WIMF. Importantly, WIMF does not give quantitative results (e.g. a food composed of 50% ingredient A and 50% ingredient B will usually not correspond to 50% reads 
+# coming from ingredient A and 50% reads coming from ingredient B for several reasons among which: differential yield of DNA extraction between the ingredients, differential amplification of the products # from the two ingredients = PCR bias etc...) and should not be used as a proof in determining whether an indicated ingredient is present neither to show that an unexpected ingredient is present. 
+
+##################################################################################################################################
+# small functions to allow bold/italic/underline text in terminal 
+ansi()          { echo -e "\e[${1}m${*:2}\e[0m"; }
+bold()          { ansi 1 "$@"; }
+italic()        { ansi 3 "$@"; }
+underline()     { ansi 4 "$@"; }
+strikethrough() { ansi 9 "$@"; }
+red()           { ansi 31 "$@"; }
+green()         { ansi 32 "$@"; }
+blue()         { ansi 34 "$@"; }
+violet()         { ansi 35 "$@"; }
+bg_green()         { ansi 42 "$@"; }
+
+# example: echo "Some $(strikethrough hello world) text"
+
+
+# handle custom parameters (options) 
+
+usage () {
+    echo "
+
+$(bold WIMF v1.0 HELP)
+
+$(bold COMMAND USAGE:)   
+                wimf -i \"SEQUENCING_RUN_FOLDER_PATH\" [-a MIN_AMPLICON_LENGTH] [-b MAX_AMPLICON_LENGTH] [-f FILTER1_QUALITY_THRESHOLD] [-q FILTER2_QUALITY_THRESHOLD] [-x FILTER3_QUALITY_THRESHOLD] [-r MIN_NUM_RAW_READS] [-g ID_THRESHOLD_CLUSTER] [-s MIN_NUM_FILT2_READS] [-t MIN_NUM_FILT3_READS] [-l CLUSTER_QUALITY_THRESHOLD_HIGH1] [-n CLUSTER_QUALITY_THRESHOLD_POOR2] [-p CLUSTER_QUALITY_THRESHOLD_HIGH3] [-w CLUSTER_QUALITY_THRESHOLD_POOR3] [-c MAX_CLUSTER] [-m THREADS_BLAST] [-e ERASE_TMP_FILES] [-d BLAST_DB_INDEX] 
+    
+Run WIMF pipeline to filter raw data and analyze which plants and animal species are detected based on amplified DNA sequenced on the MinIon sequencer 
+(using 16S gene region for vertebrates and rbcL gene region for plants). 
+
+$(bold OPTIONS:)
+$(bold -i) <str>           :  MANDATORY   Path of input sequencing run folder containing all demultiplexed MinIon data 
+                                  (folders starting with \"BC\" and containing FASTQ files).
+                                  Note: use quotes if the folder has spaces in its name (-i \"Folder with spaces in its name\")
+$(red Basic parameters)
+
+$(bold -a) <int>           : [OPTIONAL]   min read length after trimming adapters (default 250bp, adjust to expected length of smallest amplicon)
+$(bold -b) <int>           : [OPTIONAL]   max read length after trimming adapters (default 390bp, adjust to expected length of largest amplicon)
+$(bold -f) <float>         : [OPTIONAL]   Set minimum quality cutoff for average PHRED score per read to filter raw reads (Filter1 default=10)
+$(bold -r) <int>           : [OPTIONAL]   cutoff for minimum number of raw reads to process to quality filter 1 (default=200)
+$(bold -u) <int>           : [OPTIONAL]   cutoff for minimum number of filtered reads to process to clustering (default=100)
+$(bold -g) <str>           : [OPTIONAL]   Identity threshold to group similar reads into a cluster using Seekdeep qluster (default=0.965 which corresponds to 96.5%) identity)
+$(bold -j) <int>           : [OPTIONAL]   cutoff for high quality nucleotide in SeekDeep qluster (default=10)
+$(bold -k) <int>           : [OPTIONAL]   cutoff for poor quality nucleotide in SeekDeep qluster (default=8)
+
+$(red Parameters for samples with too many reads after first quality filter \(causing SeekDeep qluster to crash on 8Gb RAM PC\))
+
+$(bold -q) <float>         : [OPTIONAL]   Set minimum cutoff for average PHRED score per read to filter reads for a second time (Filter2 default=12)
+$(bold -x) <float>         : [OPTIONAL]   Set minimum cutoff for average PHRED score per read to filter reads for a third time (Filter3 default=13)
+$(bold -s) <int>           : [OPTIONAL]   cutoff for minimum number of filtered reads to process to second filter (default=100)
+$(bold -t) <int>           : [OPTIONAL]   cutoff for minimum number of filtered reads to process to third filter (default=100)
+$(bold -l) <int>           : [OPTIONAL]   cutoff for high quality nucleotide in SeekDeep qluster for reads filtered twice (default=11)
+$(bold -n) <int>           : [OPTIONAL]   cutoff for poor quality nucleotide in SeekDeep qluster for reads filtered twice (default=9)
+$(bold -p) <int>           : [OPTIONAL]   cutoff for high quality nucleotide in SeekDeep qluster for reads filtered 3 times (default=11)
+$(bold -w) <int>           : [OPTIONAL]   cutoff for poor quality nucleotide in SeekDeep qluster for reads filtered 3 times (default=19)
+
+$(red Other hardware and customizing options)
+
+$(bold -c) <int>           : [OPTIONAL]   cutoff for maximum number of reads to try clustering with SeekDeep qluster (default=10050) 
+                                  If there are more reads than this value, an additional more stringent quality filter 
+                                  will be applied to reads before atempting to use SeekDeep again. In case the second filter
+                                  still produces more reads than this value, a third more stringent filtering is applied
+                                  before trying again to use SeekDeep.
+                                  Note: if you have more than 8Gb of RAM increase this value, if SeekDeep crashes try to lower it
+$(bold -m) <int>           : [OPTIONAL]   Set the number of threads to be used by blastn (default=4, adjust to your computer usually corresponds to number of processor cores)  
+$(bold -e) <str>           : [OPTIONAL]   Erase temporary files in case of interrupted analysis (by default not active) 
+				  Note: this is the only option which does not need to process a value, use \"-d\" to activate it
+$(bold -d) <str>           : [OPTIONAL]   Provide the index (including path) of custom BLAST database to be used in the analysis (default database is for 16S, rbcL and matK gene regions)
+
+$(bold OUTPUT:)
+                   The output will be contained in a folder named as the original sequencing run folder followed by\"_WIMF\".
+                   For example, if the input folder is named \"inSeqFolder\" the analysis results will be in a folder named 
+                   \"inSeqFolder_WIMF\", see WIMF documentation for results format details.
+                   The output folder will be located in the same path as the input sequencing folder.
+
+$(bold COMMAND EXAMPLES:)
+
+# to set the minimum read length to 200bp and the maximum to 550bp:
+# you can run this command, replacing SEQUENCING_RUN_PATH_FOLDER with the corresponding path (keeping the pair of quotes if there are spaces in the path of the folder):
+$(bold wimf -i \"SEQUENCING_RUN_FOLDER_PATH\" -a 200 -b 550)
+# to set the minimum read length to 200bp and the maximum to 550bp, lower threshold to filter raw reads to 100 and remove all files in case of interruption:
+$(bold wimf -i \"SEQUENCING_RUN_FOLDER_PATH\" -a 200 -b 550 -r 100 -e)
+# Equivalent to (order of options can change)
+$(bold wimf -i \"SEQUENCING_RUN_FOLDER_PATH\" -r 100 -a 200 -e -b 550)
+
+
+Author: O. Emery (2019)
+Digital Epidemiology Lab (Swiss Institute of Technology  EPFL, Lausanne, Switzerland)
+
+To request new features for WIMF or to report bugs/issues or for support, please use github:
+https://github.com/salathegroup/Food-Repo-DNA-analysis/WIMF_v1
+
+"
+    exit 0
+}
+
+
+# WIMF v1.0 Default values (DO NOT CHANGE FOR THIS VERSION)
+
+MIN_AMPLICON_LENGTH=250
+MAX_AMPLICON_LENGTH=390
+FILTER1_QUALITY_THRESHOLD=10
+FILTER2_QUALITY_THRESHOLD=12
+FILTER3_QUALITY_THRESHOLD=13
+MIN_NUM_RAW_READS=200
+MIN_NUM_FILT1_READS=100
+MIN_NUM_FILT2_READS=100
+MIN_NUM_FILT3_READS=100
+MAX_CLUSTER=10050  # number or reads empirically determined to pass through SeekDeep qluster without causing memory limit error with 8Gb RAM 
+THREADS_BLAST=4
+ERASE_TMP_FILES=0
+BLAST_DB_INDEX="${WIMF_INSTALL_PATH}/BLASTdb/16SrbcLDB"
+ID_THRESHOLD_CLUSTER=0.965
+CLUSTER_QUALITY_THRESHOLD_HIGH1=10
+CLUSTER_QUALITY_THRESHOLD_POOR1=8
+CLUSTER_QUALITY_THRESHOLD_HIGH2=11
+CLUSTER_QUALITY_THRESHOLD_POOR2=9
+CLUSTER_QUALITY_THRESHOLD_HIGH3=11
+CLUSTER_QUALITY_THRESHOLD_POOR3=9
+
+# RETRIEVE FULL COMMAND INCLUDING USER DEFINED OPTIONS:
+FULL_COMMAND="$@"
+
+# Read arguments
+while [ "$1" != "" ]; do
+    case $1 in
+        "-h") # help
+            shift; usage; exit 0 ;;
+        "-v")
+            echo 'WIMF version 1.0'; exit 0 ;;   
+        "-i") # Sequencing Run directory (INPUT)
+            RUN_FOLDER="$2"
+            if [[ "$RUN_FOLDER" == */ ]]
+               then RUN_FOLDER="${RUN_FOLDER::-1}"
+            fi
+            shift 2 ;;
+        "-a")
+            MIN_AMPLICON_LENGTH=$2; shift 2 ;;
+        "-b")
+            MAX_AMPLICON_LENGTH=$2; shift 2 ;;
+        "-f")
+            FILTER1_QUALITY_THRESHOLD=$2; shift 2 ;;
+        "-q")
+            FILTER2_QUALITY_THRESHOLD=$2; shift 2 ;;
+        "-x")
+            FILTER3_QUALITY_THRESHOLD=$2; shift 2 ;;
+        "-r")
+            MIN_NUM_RAW_READS=$2; shift 2 ;;
+        "-u")
+            MIN_NUM_FILT1_READS=$2; shift 2 ;;
+        "-s")
+            MIN_NUM_FILT2_READS=$2; shift 2 ;;
+        "-t") 
+            MIN_NUM_FILT3_READS=$2; shift 2 ;;
+        "-c") 
+            MAX_CLUSTER=$2; shift 2;;
+        "-m") 
+            THREADS_BLAST=$2; shift 2;;
+        "-e") 
+            ERASE_TMP_FILES=1; shift ;; # flag option: only shift by one
+        "-d") 
+            BLAST_DB_INDEX=$2; shift 2 ;;
+        "-g") 
+            ID_THRESHOLD_CLUSTER=$2; shift 2 ;;
+        "-j") 
+            CLUSTER_QUALITY_THRESHOLD_HIGH1=$2; shift 2 ;;
+        "-k") 
+            CLUSTER_QUALITY_THRESHOLD_POOR1=$2; shift 2 ;;
+        "-l")
+            CLUSTER_QUALITY_THRESHOLD_HIGH2=$2; shift 2 ;;
+        "-n") 
+            CLUSTER_QUALITY_THRESHOLD_POOR2=$2; shift 2 ;;
+        "-p") 
+            CLUSTER_QUALITY_THRESHOLD_HIGH3=$2; shift 2 ;;
+        "-w") 
+            CLUSTER_QUALITY_THRESHOLD_POOR3=$2; shift 2 ;;
+        *)
+            echo "ERROR: non existing option: $1"; echo "Enter 'wimf -h' to display WIMF help"; exit 0; shift ;;
+    esac
+done
+INSTALL_PATH=$WIMF_INSTALL_PATH # $WIMF_INSTALL_PATH must be defined during install and saved in ~/.bashrc see documentation
+
+# CODE to trap the interrupt from user CTL-C/errors
+trap interruptCleanup INT ERR
+
+function interruptCleanup() {
+    echo 
+    echo "ERROR: WIMF interrupted by error or CTL+C"
+    if [ $ERASE_TMP_FILES -eq 1 ]; then
+    	echo "OPTION -e USED: ERASING OUTPUT FOLDER AND TEMPORARY FILES"
+        if [ -f NanoFilt.log ]; then   
+          rm NanoFilt.log
+        fi
+    	rm -r "${RUN_FOLDER}_WIMF"
+    fi
+    exit
+}
+ 
+# unncomment for debugging purposes
+#echo "RUN_FOLDER = "
+#echo "$RUN_FOLDER"
+
+# if output folder does not exist, create it
+if [ ! -d "${RUN_FOLDER}_WIMF" ]; then
+ mkdir "${RUN_FOLDER}_WIMF"
+ else                       # if it exists, delete it and re-create it (for overwriting purposes)
+   rm -r "${RUN_FOLDER}_WIMF"
+   mkdir "${RUN_FOLDER}_WIMF"
+fi
+
+################################### logging standard output
+
+mkdir "${RUN_FOLDER}_WIMF"/LOGS
+logFile="${RUN_FOLDER}_WIMF"/LOGS/WIMF.log
+mkfifo "${logFile}".pipe
+tee < "${logFile}".pipe "$logFile" &
+exec &> "${logFile}".pipe
+rm "${logFile}".pipe
+echo -e "\n"
+echo -e "$(bg_green WIMF \- What\'s In My Food v1\.0 )"
+echo ""
+echo -e "$(bold STARTING...)\n"
+
+echo -e "$(bold Output folder): ${RUN_FOLDER}_WIMF\n"
+
+readarray -t folderList < <(ls "${RUN_FOLDER}" | grep BC) 	# Make array containing as elements the folders starting with "BC_" in the $RUN_FOLDER
+numFolders=${#folderList[@]}
+echo -e "$(underline List of barcode folders) ($numFolders):"
+for ((i=0;i<$numFolders;i++))
+  do echo ${folderList[$i]}
+done
+
+echo ""
+echo ""
+
+# Other logs:
+notUsedlog="${RUN_FOLDER}_WIMF"/LOGS/NotAnalyzed.log
+lowRawlog="${RUN_FOLDER}_WIMF"/LOGS/LowRawReads.log
+lowFiltlog="${RUN_FOLDER}_WIMF"/LOGS/LowFiltReads.log
+
+####################################### Function definitions #####################################################################
+
+# concatenate all FASTQ files from one BC folder (given as first argument) and save it in ${RUN_FOLDER}_WIMF/$BC_FOLDER
+catFASTQs () {
+  BC_FOLDER="${1}"
+  # if subfolder does not exist, create it
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER" ]; then
+    mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER"
+  fi
+  echo -e "**************** $BC_FOLDER ($((i+1))/$numFolders) ******************\n\n"
+  if test -f "${RUN_FOLDER}_WIMF/$BC_FOLDER/allSeqs.fastq"; 
+        then # if file exists, delete it (to avoid appending text to existing file)
+          rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/allSeqs.fastq"
+      fi
+  printf "Concatenating FASTQ files from $BC_FOLDER... "
+  cat "${RUN_FOLDER}/${BC_FOLDER}/"*.fastq > "${RUN_FOLDER}_WIMF/$BC_FOLDER/allSeqs.fastq"
+  echo -e "DONE\n"
+}
+
+# Determine based on FASTQ size whether there are enough reads to carry on the basic plotting of raw data
+preCheck() {
+earlyStop=3 # variable to store whether the analysis was stopped after the following check or not
+totalNumReads=$((`wc -l "${RUN_FOLDER}_WIMF/$BC_FOLDER/allSeqs.fastq"  | cut -d' ' -f1` / 4)) # since each read in the FASTQ format is defined by 4 lines we divide by 4 the number of lines in the file to get the number of reads
+if [ "$totalNumReads" -ge 10 ] # Exclude samples with less than 10 raw reads
+then
+    echo ""
+    echo -e "$(blue Enough raw reads \($totalNumReads\) to perform quality control)"
+    echo ""
+    earlyStop=0
+else
+    echo "" 
+    echo -e "$(red Warning: not enough reads \(Total = $totalNumReads\) to perform quality control, output folder deleted)"
+         rm -r "${RUN_FOLDER}_WIMF/$BC_FOLDER"
+    earlyStop=1
+fi
+}
+
+qualityControl () {
+  QCstartTime=$(date +%s)
+  enoughRawReads=0
+  # if subfolder does not exist, create it
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER/01_QC_NanoPlot" ]; then
+  mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER/01_QC_NanoPlot"
+  fi
+  printf "$(bold Quality control)... "
+  # Data plots and statistics of raw reads, stored in "01_QC_NanoPlot" output folder
+  NanoPlot -t 2 --fastq "${RUN_FOLDER}_WIMF/$BC_FOLDER/allSeqs.fastq" --maxlength 40000 --plots hex dot -o "${RUN_FOLDER}_WIMF/$BC_FOLDER/01_QC_NanoPlot"
+  echo "DONE"
+  head -n 8 "${RUN_FOLDER}_WIMF/$BC_FOLDER/01_QC_NanoPlot/NanoStats.txt" | tail -n +2 | sed 's/\.0//g' 
+  grep ">Q$FILTER1_QUALITY_THRESHOLD" "${RUN_FOLDER}_WIMF/$BC_FOLDER/01_QC_NanoPlot/NanoStats.txt"
+  # extract stats for report
+  nanoStats="${RUN_FOLDER}_WIMF/$BC_FOLDER/01_QC_NanoPlot/NanoStats.txt"
+  numRawReads=$(grep "Number of reads" "$nanoStats" | cut -d":" -f2  |sed 's/\.0//g'|  sed 's/ //g'|  sed 's/,//g')
+  numRawReads1=$(grep "Number of reads" "$nanoStats" | cut -d":" -f2  |sed 's/\.0//g'|  sed 's/ //g')
+  meanReadQ=$(grep "Mean read quality" "$nanoStats" | cut -d":" -f2  |sed 's/ //g')
+  meanReadLength=$(grep "Mean read length" "$nanoStats" | cut -d":" -f2  |sed 's/ //g')
+  readN50=$(grep "Read length N50" "$nanoStats" | cut -d":" -f2  |sed 's/\.0//g'| sed 's/ //g')
+  totalBases=$(grep "Total bases" "$nanoStats" | cut -d":" -f2  | sed 's/\.0//g'|sed 's/ //g')
+ # echo "$numRawReads"
+  QCTimeSecs="$(($(date +%s) - ${QCstartTime}))"
+  QCTime=$(convertPrintSeconds $QCTimeSecs)
+  echo "$(violet Time Elapsed for QC in $BC_FOLDER : $QCTime)" 
+  if [ "$numRawReads" -ge $MIN_NUM_RAW_READS ]
+  then 
+    echo ""
+    echo -e "$(blue Number of RAW reads OK \(above threshold of $MIN_NUM_RAW_READS\))"
+    enoughRawReads=1
+  else
+    echo ""
+    echo -e "$(red WARNING: number of RAW reads below threshold of $MIN_NUM_RAW_READS)"
+    echo -e "$BC_FOLDER		Total number of raw reads = $numRawReads" >> "${lowRawlog}"
+    makeRawReport # make report for sample without enough raw reads
+    if [ ! -d "${RUN_FOLDER}_WIMF/LowRawReadsSamples" ]; then # create folder if it doesn't exist
+      mkdir "${RUN_FOLDER}_WIMF/LowRawReadsSamples"
+    fi
+    if [ ! -d "${RUN_FOLDER}_WIMF/LowRawReadsSamples/$BC_FOLDER" ]; then # create subfolder if it doesn't exist
+      mkdir "${RUN_FOLDER}_WIMF/LowRawReadsSamples/$BC_FOLDER" 
+    fi
+    mv "${RUN_FOLDER}_WIMF/${BC_FOLDER}"/* "${RUN_FOLDER}_WIMF/LowRawReadsSamples/$BC_FOLDER"
+    rm -r "${RUN_FOLDER}_WIMF/$BC_FOLDER" # remove the empty BC_FOLDER"
+    echo -e "$(red Folder ${RUN_FOLDER}_WIMF/$BC_FOLDER with raw data plots)"
+    echo -e "$(red and concatenated FASTQ file moved to ${RUN_FOLDER}_WIMF/LowRawReadsSamples/$BC_FOLDER)"
+    enoughRawReads=0
+  fi
+}
+
+filter1Reads () {
+  
+  echo "Removal of adapters with Porechop:"
+  RAstartTime=$(date +%s)
+  porechop -i "${RUN_FOLDER}_WIMF/$BC_FOLDER/allSeqs.fastq" -o "${RUN_FOLDER}_WIMF/$BC_FOLDER/allSeqsNoAdapters.fastq"
+  RATimeSecs="$(($(date +%s) - ${RAstartTime}))"
+  RATime=$(convertPrintSeconds $RATimeSecs)
+  echo "$(violet Time Elapsed for removing adapters in $BC_FOLDER: $RATime)"
+  echo -e "$(bold Removal of adapters finished)\n"
+  # Delete concatenated FASTQ file of all raw sequences if it exists
+  if [ -f "${RUN_FOLDER}_WIMF/$BC_FOLDER/allSeqs.fastq" ]; then
+    rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/allSeqs.fastq"
+  fi
+  # if subdirectory does not exist, create it
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt_NanoFilt" ]; then
+  mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt_NanoFilt"
+  fi
+  echo -e "$(bold Filtering of reads without adapters with):\nminimum read size of ${MIN_AMPLICON_LENGTH} bp,\nmaximum read size of $MAX_AMPLICON_LENGTH bp"
+  printf "and Phread quality score > $FILTER1_QUALITY_THRESHOLD... "
+  # Filtering defaults: min Phred quality score of 10 (90% accuracy), min read lenght of 250, max read lenght of 390 
+  # (length interval corresponds to expected amplicon sizes), filtered reads saved as filt_BCXX.fastq
+  Filt1startTime=$(date +%s) # timer to keep track of time
+  NanoFilt -q$FILTER1_QUALITY_THRESHOLD --length $MIN_AMPLICON_LENGTH --maxlength $MAX_AMPLICON_LENGTH "${RUN_FOLDER}_WIMF/$BC_FOLDER/allSeqsNoAdapters.fastq" > "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt_NanoFilt/filtSeqs.fastq"
+  echo "DONE"
+  Filt1TimeSecs="$(($(date +%s) - ${Filt1startTime}))"
+  Filt1Time=$(convertPrintSeconds $Filt1TimeSecs)
+  echo -e "$(violet Time Elapsed for filtering reads with \>Q$FILTER1_QUALITY_THRESHOLD and size between $MIN_AMPLICON_LENGTH and $MAX_AMPLICON_LENGTH bp in $BC_FOLDER \: $Filt1Time)"
+  # Delete concatenated FASTQ file of all raw sequences without adapters if it exists
+  if [ -f "${RUN_FOLDER}_WIMF/$BC_FOLDER/allSeqsNoAdapters.fastq" ]; then
+    rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/allSeqsNoAdapters.fastq"
+  fi
+
+  printf "Computing statistics and plots for filtered reads... "
+  # Data plots and statistics of filtered reads, stored in "02_Filt_NanoFilt" output folder
+  NanoPlot -t 2 --fastq "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt_NanoFilt/filtSeqs.fastq" --maxlength 40000 --plots hex dot -o "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt_NanoFilt"
+  echo "DONE"
+  head -n 8 "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt_NanoFilt/NanoStats.txt" | tail -n +2 | sed 's/\.0//g' 
+  numFiltReads=$(grep "Number of reads" "${RUN_FOLDER}_WIMF/$BC_FOLDER"/02_Filt_NanoFilt/NanoStats.txt | cut -d":" -f2  | sed 's/\,//g' | sed 's/\.0//g' | sed 's/ //g')
+  nanoStats2="${RUN_FOLDER}_WIMF/$BC_FOLDER"/02_Filt_NanoFilt/NanoStats.txt
+  numFiltReads=$(grep "Number of reads" "$nanoStats2" | cut -d":" -f2  | sed 's/\.0//g'| sed 's/,//g'| sed 's/ //g')
+  numFiltReads1=$(grep "Number of reads" "$nanoStats2" | cut -d":" -f2  | sed 's/\.0//g'| sed 's/ //g')
+  meanReadQ2=$(grep "Mean read quality" "$nanoStats2" | cut -d":" -f2  |sed 's/ //g')
+  meanReadLength2=$(grep "Mean read length" "$nanoStats2" | cut -d":" -f2  |sed 's/ //g')
+  readN502=$(grep "Read length N50" "$nanoStats2" | cut -d":" -f2  |sed 's/\.0//g'| sed 's/ //g')
+  totalBases2=$(grep "Total bases" "$nanoStats2" | cut -d":" -f2 |sed 's/\.0//g'|sed 's/ //g')
+  # echo "$numFiltReads"
+    if [ $numFiltReads -ge $MIN_NUM_FILT1_READS ]
+  then
+    echo ""
+    echo -e "$(green Number of FILTERED reads OK \(above threshold of $MIN_NUM_FILT1_READS\))"
+    echo ""
+    enoughFiltReads=1
+  else
+    echo ""
+    echo -e "$(red WARNING: number of FILTERED reads below threshold of $MIN_NUM_FILT1_READS)"
+    echo ""
+    enoughFiltReads=0
+  fi
+}
+
+
+
+filterReads2 () { # to filter reads for the second time with filter2 quality threshold (=Q12 by default) if there are too many filtered reads for clustering (applied to reads from filter1)
+  echo ""
+  echo "$(underline $(bold VERY HIGH QUALITY SAMPLE)):"
+  echo "The number of filtered reads with mean quality > Q$FILTER1_QUALITY_THRESHOLD is too large relative to cutoff ($MAX_CLUSTER) to work with SeekDeep qluster on a 8Gb RAM PC without crashing"
+  Filter2startTime=$(date +%s)
+  # if subdirectory does not exist, create it
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt2_NanoFilt" ]; then
+    mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt2_NanoFilt"
+  fi
+  echo -e "$(bold Second filtering of reads without adapters with mean score \> Q${FILTER2_QUALITY_THRESHOLD}...)"
+  # Filtering: min Phred quality score of 12 
+  # (length interval corresponds to expected amplicon sizes), filtered reads saved as filt_BC04.fastq
+  NanoFilt -q${FILTER2_QUALITY_THRESHOLD} "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt_NanoFilt/filtSeqs.fastq" > "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt2_NanoFilt/filtSeqs.fastq"
+  echo "DONE"
+  Filter2TimeSecs="$(($(date +%s) - ${Filter2startTime}))"
+  Filter2Time=$(convertPrintSeconds $Filter2TimeSecs)
+  echo "$(violet Time Elapsed for second filtering of reads with \>Q${FILTER2_QUALITY_THRESHOLD} in $BC_FOLDER : $Filter2Time)"
+  printf "Computing statistics and plots for > Q${FILTER2_QUALITY_THRESHOLD} filtered reads... "
+  # Data plots and statistics of filtered reads, stored in "02_Filt2_NanoFilt" output folder
+  NanoPlot -t 2 --fastq "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt2_NanoFilt/filtSeqs.fastq" --maxlength 40000 --plots hex dot -o "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt2_NanoFilt"
+  echo "DONE"
+  rm -r "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt_NanoFilt"  # remove folder containing results from first filtering, comment this line to keep them
+  head -n 8 "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt2_NanoFilt/NanoStats.txt" | tail -n +2 | sed 's/\.0//g' 
+  numFilt2Reads=$(grep "Number of reads" "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt2_NanoFilt/NanoStats.txt" | cut -d":" -f2  | sed 's/\,//g' | sed 's/\.0//g' | sed 's/ //g')
+  nanoStats3="${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt2_NanoFilt/NanoStats.txt"
+  numFiltReads3=$(grep "Number of reads" "$nanoStats3" | cut -d":" -f2  | sed 's/\.0//g'| sed 's/,//g'| sed 's/ //g')
+  meanReadQ3=$(grep "Mean read quality" "$nanoStats3" | cut -d":" -f2  |sed 's/ //g')
+  meanReadLength3=$(grep "Mean read length" "$nanoStats3" | cut -d":" -f2  |sed 's/ //g')
+  readN503=$(grep "Read length N50" "$nanoStats3" | cut -d":" -f2  |sed 's/\.0//g'| sed 's/ //g')
+  totalBases3=$(grep "Total bases" "$nanoStats3" | cut -d":" -f2 |sed 's/\.0//g'|sed 's/ //g')
+  #echo "$numFilt2Reads"
+  if [ "$numFilt2Reads" -ge $MIN_NUM_FILT3_READS ]; then
+    echo ""
+    echo -e "$(green Number of \>Q${FILTER2_QUALITY_THRESHOLD} FILTERED reads sufficient \(above threshold of $MIN_NUM_FILT3_READS\))"
+    echo ""
+    enoughFiltReads=1
+  else
+    echo ""
+    echo -e "$(red WARNING: number of >Q${FILTER2_QUALITY_THRESHOLD} FILTERED reads below threshold of $MIN_NUM_FILT3_READS)"
+    echo ""
+    enoughFiltReads=0
+  fi
+}
+
+clusterConsensus2 () { # aggregate similar reads (at default 96.5%identity) of filtered reads from second filter into clusters and obtain their respective consensus sequences
+  # if subdirectory does not exist, create it
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER/03_clusterConsensus" ]; then
+  mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER/03_clusterConsensus"
+  fi
+  qlust_startTime=$(date +%s)
+  printf "Clustering with identity=$ID_THRESHOLD_CLUSTER, quality thresholds Q${CLUSTER_QUALITY_THRESHOLD_HIGH2}, Q${CLUSTER_QUALITY_THRESHOLD_POOR2}... " # %% is to print the percent sign (%)
+  qlust_startTime=$(date +%s)
+  SeekDeep qluster --fastq "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt2_NanoFilt/filtSeqs.fastq" --otu $ID_THRESHOLD_CLUSTER --qualThres ${CLUSTER_QUALITY_THRESHOLD_HIGH2},${CLUSTER_QUALITY_THRESHOLD_POOR2} --overWriteDir --dout  "${RUN_FOLDER}_WIMF/$BC_FOLDER/03_clusterConsensus"
+  echo -e "DONE\n"
+  qlustTimeSecs="$(($(date +%s) - ${qlust_startTime}))"
+  qlustTime=$(convertPrintSeconds $qlustTimeSecs)
+  echo "$(violet Time Elapsed for clustering in $BC_FOLDER : $qlustTime)"
+  numberClusters=$(wc -l "${RUN_FOLDER}_WIMF/$BC_FOLDER/03_clusterConsensus/output.fastq" | cut -d' ' -f1)
+  let numberClusters=$numberClusters/4 # the FASTA file has 4 lines per cluster (one for the header/title, one for the sequence, one for quality score of each base and one for DNA strand direction)
+  echo "$numberClusters clusters found (including singletons = clusters supported by a single read)"
+}
+
+
+filterReads3 () { # to filter reads for the third time with Filter3 quality threshold (=Q13 by default) if there are too many filtered reads for clustering (applied to reads filtered reads from the second filter)
+  echo ""
+  echo "$(underline $(bold EXTREMELY HIGH QUALITY SAMPLE)):"
+  echo "The number of filtered reads with mean quality > Q$FILTER3_QUALITY_THRESHOLD is too large (>$MAX_CLUSTER) to work with SeekDeep qluster on a 8Gb RAM PC without crashing"
+  Filt3startTime=$(date +%s)
+  # if subdirectory does not exist, create it
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt3_NanoFilt" ]; then
+    mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt3_NanoFilt"
+  fi
+  echo -e "$(bold Third filtering of reads without adapters with mean quality \> Q${FILTER3_QUALITY_THRESHOLD}...)"
+  # Filtering: min Phred quality score of 13 
+  NanoFilt -q${FILTER3_QUALITY_THRESHOLD} "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt2_NanoFilt/filtSeqs.fastq" > "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt3_NanoFilt/filtSeqs.fastq"
+  echo "DONE"
+  Filt3TimeSecs="$(($(date +%s) - ${Filt3startTime}))"
+  Filt3Time=$(convertPrintSeconds $Filt3TimeSecs)
+  echo "$(violet Time Elapsed for second filtering of reads with \>$QFILTER3_QUALITY_THRESHOLD in $BC_FOLDER : $Filt3Time)"
+  printf "Computing statistics and plots for > Q$QFILTER3_QUALITY_THRESHOLD filtered reads... "
+  # Data plots and statistics of filtered reads, stored in "02_Filt2_NanoFilt" output folder
+  NanoPlot -t 2 --fastq "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt3_NanoFilt/filtSeqs.fastq" --maxlength 40000 --plots hex dot -o "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt3_NanoFilt"
+  echo "DONE"
+
+  rm -r "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt2_NanoFilt"  # remove folder containing results from first filtering, comment this line to keep them
+  head -n 8 "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt3_NanoFilt/NanoStats.txt" | tail -n +2 | sed 's/\.0//g' 
+  numFilt3Reads=$(grep "Number of reads" "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt3_NanoFilt/NanoStats.txt" | cut -d":" -f2  | sed 's/\,//g' | sed 's/\.0//g' | sed 's/ //g')
+  nanoStats4="${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt3_NanoFilt/NanoStats.txt"
+  numFiltReads4=$(grep "Number of reads" "$nanoStats4" | cut -d":" -f2  | sed 's/\.0//g'| sed 's/ //g')
+  meanReadQ4=$(grep "Mean read quality" "$nanoStats4" | cut -d":" -f2  |sed 's/ //g')
+  meanReadLength4=$(grep "Mean read length" "$nanoStats4" | cut -d":" -f2  |sed 's/ //g')
+  readN504=$(grep "Read length N50" "$nanoStats4" | cut -d":" -f2  |sed 's/\.0//g'| sed 's/ //g')
+  totalBases4=$(grep "Total bases" "$nanoStats4" | cut -d":" -f2 |sed 's/\.0//g'|sed 's/ //g')
+  #echo "$numFilt3Reads"
+  if [ "$numFilt3Reads" -ge 100 ]; then  # >=100 (hard coded, this was always the case in tested samples, might differ with other samples 
+    echo ""
+    echo -e "$(green Number of \>Q$QFILTER3_QUALITY_THRESHOLD FILTERED reads sufficient \(above threshold of 100\))"
+    echo ""
+    enoughFiltReads=1
+  else
+    echo ""
+    echo -e "$(red ERROR: number of >Q$QFILTER3_QUALITY_THRESHOLD FILTERED reads below threshold of 100 (hard coded value), exiting. Try an alternative filter. No report will be generated for this sample)"
+    echo ""
+    enoughFiltReads=0
+    
+  fi
+}
+
+clusterConsensus3 () { # aggregate similar reads (at 96.5% identity) of filtered reads from third quality filter (defaults, others can be set by user to other values) into clusters and obtain their respective consensus sequences
+  # if subdirectory does not exist, create it
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER/03_clusterConsensus" ]; then
+  mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER/03_clusterConsensus"
+  fi
+  qlust_startTime=$(date +%s)
+  printf "Clustering with identity=$ID_THRESHOLD_CLUSTER, quality thresholds Q${CLUSTER_QUALITY_THRESHOLD_HIGH3}, Q${CLUSTER_QUALITY_THRESHOLD_POOR3}... " # %% is to print the percent sign (%)
+
+  SeekDeep qluster --fastq "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt3_NanoFilt/filtSeqs.fastq" --otu $ID_THRESHOLD_CLUSTER --qualThres ${CLUSTER_QUALITY_THRESHOLD_HIGH3},${CLUSTER_QUALITY_THRESHOLD_POOR3} --overWriteDir --dout  "${RUN_FOLDER}_WIMF/$BC_FOLDER/03_clusterConsensus"
+  echo -e "DONE\n"
+  qlustTimeSecs="$(($(date +%s) - ${qlust_startTime}))"
+  qlustTime=$(convertPrintSeconds $qlustTimeSecs)
+  echo "$(violet Time Elapsed for clustering in $BC_FOLDER : $qlustTime)"
+  numberClusters=$(wc -l "${RUN_FOLDER}_WIMF/$BC_FOLDER/03_clusterConsensus/output.fastq" | cut -d' ' -f1)
+  let numberClusters=$numberClusters/4 # the FASTA file has 4 lines per cluster (one for the header/title, one for the sequence, one for quality score of each base and one for DNA strand direction)
+  echo "$numberClusters clusters found (including singletons = clusters supported by a single read)"
+}
+
+# Function to convert time in secs to human readable format (minutes and seconds)
+
+convertPrintSeconds() {
+    secs=$1
+    printf '%02dh:%02dm:%02ds' $(($secs/3600)) $(($secs%3600/60)) $(($secs%60))
+}
+
+filtReadsFASTQtoFASTA () {
+  printf "Converting filtered reads from FASTQ to FASTA... "
+  cat "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt_NanoFilt/filtSeqs.fastq" | paste - - - - | cut -f 1,2 | sed 's/^@/>/' | tr "\t" "\n" > "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt_NanoFilt/filtSeqs.fasta"
+  echo "DONE"
+}
+
+#
+clusterConsensus () { # aggregate similar reads (at 96.5% identity) into clusters and obtain their respective consensus sequences
+  # if subdirectory does not exist, create it
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER/03_clusterConsensus" ]; then
+  mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER/03_clusterConsensus"
+  fi
+  printf "Clustering with identity=$ID_THRESHOLD_CLUSTER, quality thresholds Q${CLUSTER_QUALITY_THRESHOLD_HIGH1}, Q${CLUSTER_QUALITY_THRESHOLD_POOR1}... " # %% is to print the percent sign (%)
+  qlust_startTime=$(date +%s)
+  SeekDeep qluster --fastq "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt_NanoFilt/filtSeqs.fastq" --otu $ID_THRESHOLD_CLUSTER --qualThres ${CLUSTER_QUALITY_THRESHOLD_HIGH1},${CLUSTER_QUALITY_THRESHOLD_POOR1} --overWriteDir --dout  "${RUN_FOLDER}_WIMF/$BC_FOLDER/03_clusterConsensus"
+  echo -e "DONE\n"
+  qlustTimeSecs="$(($(date +%s) - ${qlust_startTime}))"
+  qlustTime=$(convertPrintSeconds $qlustTimeSecs)
+  echo "$(violet Time Elapsed for clustering in $BC_FOLDER : $qlustTime)"
+  numberClusters=$(wc -l "${RUN_FOLDER}_WIMF/$BC_FOLDER/03_clusterConsensus/output.fastq" | cut -d' ' -f1)
+  let numberClusters=$numberClusters/4 # the FASTA file has 4 lines per cluster (one for the header/title, one for the sequence, one for quality score of each base and one for DNA strand direction)
+  echo "$numberClusters clusters found (including singletons = clusters supported by a single read)"
+}
+
+treatClusters () {
+
+ 
+  # check if fastq file containing clusters and their consensus sequences exists
+  if test -f "${1}/03_clusterConsensus/output.fastq"; 
+    then # if so, convert FASTQ to FASTA
+      printf "Converting FASTQ sequences from clusters (consensus) to FASTA... "
+      cat "${1}/03_clusterConsensus/output.fastq" | paste - - - - | cut -f 1,2 | sed 's/^@/>/' | tr "\t" "\n" > "${1}/03_clusterConsensus/output.fasta"
+      echo "DONE"
+      # if subdirectory which will contain BLAST results does not exist, create it
+      # BLAST the consensus sequences against the local nucleotide BLAST database (16S from animals/fungi + rbcL gene for plants)
+      if [ ! -d "${1}/04_BLASTclusters" ]; then
+        mkdir "${1}/04_BLASTclusters"
+      fi
+      numClustersInitial=$((`wc -l "${1}/03_clusterConsensus/output.fasta" | cut -d' ' -f1` / 2))
+ 
+      BLAST1startTime=$(date +%s)
+      printf "BLAST of %i consensus sequences against local nucleotide database... " $numClustersInitial
+      # BLAST using -num_threads 4 as default (PC with 4 cores, increase to the number of cores of your machine to decrease time)
+      blastn -query "${1}/03_clusterConsensus/output.fasta" -db "${BLAST_DB_INDEX}" -outfmt '6 qseqid pident qcovs length mismatch gapopen qstart qend evalue bitscore stitle' -num_alignments 100 \
+             -num_threads $THREADS_BLAST -out "${1}/04_BLASTclusters/BLASTresults.out"
+      echo "DONE"
+      blastTimeSecs="$(($(date +%s) - ${BLAST1startTime}))"
+      blastTime=$(convertPrintSeconds $blastTimeSecs)
+      echo "$(violet Time Elapsed for BLAST in $BC_FOLDER : $blastTime)"      
+           # reformatting local BLAST output
+      echo "Started local BLAST output reformatting"
+      LOCALBLASTRESULTS="${1}/04_BLASTclusters/BLASTresults.out" 
+      BLASTFOLDER="${1}/04_BLASTclusters"
+      echo 'Retrieving queries (unique read IDs saved as "uniqueIDs.txt")'
+      cut -d$'\t' -f1 "$LOCALBLASTRESULTS" | uniq > "${BLASTFOLDER}/uniqueIDs.txt"
+      numClustersBLAST=$(wc -l "${BLASTFOLDER}/uniqueIDs.txt" | cut -d' ' -f1)
+      echo "Number of consensus sequences with (not filtered) BLAST results = $numClustersBLAST"
+      # read each entry of uniqueIDs.txt and use it as grep pattern to find and extract its first occurence in $LOCALBLASTRESULTS file
+      echo 'Getting first BLAST hit results of each query (saved as "firstHits.txt")'
+      # Extracts line (first hit results) when 1rst field (read ID) changes
+      awk -F'\t' '!a[$1]++' "$LOCALBLASTRESULTS"  > "${BLASTFOLDER}/firstHits.txt"
+      if test -f "${BLASTFOLDER}/firstHits_TMP.txt"; 
+        then # if file exists, delete it (to avoid appending text to existing file)
+          rm "${BLASTFOLDER}/firstHits_TMP.txt"
+      fi
+
+      # Read firstHits.txt file 
+      while read line; do
+        # get scientific name of species (two parts)
+        species=$(echo $line | cut -d' ' -f11,12)
+        # get name of cluster
+        name=$(echo $line | cut -d' ' -f1)
+        numReads=$(echo $name | cut -d't' -f3)  # cut -d'_' -f2 | cut -d't' -f2)
+        ID=$(echo $line | cut -d' ' -f2)
+        qcov=$(echo $line | cut -d' ' -f3) # query coverage
+        length=$(echo $line | cut -d' ' -f4)
+	mismatch=$(echo $line | cut -d' ' -f5)
+        gapopen=$(echo $line | cut -d' ' -f6)
+        evalue=$(echo $line | cut -d' ' -f9)
+        bitscore=$(echo $line | cut -d' ' -f10) 
+        # APPLY WEIGHT TO VALUES (multiply by number of reads in cluster) in order to get weighted average by species later on 
+        ID2=$(python -c "print($numReads*$ID)")
+        qcov2=$(python -c "print($numReads*$qcov)")
+        length2=$(python -c "print($numReads*$length)")
+	mismatch2=$(python -c "print($numReads*$mismatch)")
+        gapopen2=$(python -c "print($numReads*$gapopen)")
+        evalue2=$(python -c "print($numReads*$evalue)")
+        bitscore2=$(python -c "print($numReads*$bitscore)")
+        
+       # keep only results with >95% identity and >90% query coverage, add a column with "1"'s only (to later be able to count number of clusters by species), save in firstHits_TMP.txt
+        if (( $(echo "$ID > 95" |bc -l) )) && (( $(echo "$qcov > 90") )); then
+           echo "$species $name $numReads $ID2 $qcov2 $length2 $mismatch2 $gapopen2 $evalue2 ${bitscore2} 1" >> "${BLASTFOLDER}/firstHits_TMP.txt"
+        fi
+      done < "${BLASTFOLDER}/firstHits.txt"
+
+      # uncomment for debugging
+      #echo "BEFORE COL SUMS"
+      #cat ${BLASTFOLDER}/firstHits_TMP.txt
+      #echo "END"
+      # Get the total number of clusters that are considered for the report (without those for which BLAST hits had <90% query coverage or <95% identity to query)
+      numClustersFinal=$(wc -l "${BLASTFOLDER}/firstHits_TMP.txt" | cut -d' ' -f1)
+      # if same species, sum the corresponding numeric values per column (number of reads, as well as previously weighted values), print species name and corresponding sum of reads, sum of last column (to get number of clusters) 
+      cat "${BLASTFOLDER}/firstHits_TMP.txt" | awk '{a[$1" "$2]+=$4; b[$1" "$2]+=$12; c[$1" "$2]+=$5; d[$1" "$2]+=$6; e[$1" "$2]+=$7; f[$1" "$2]+=$8; g[$1" "$2]+=$9; h[$1" "$2]+=$10; j[$1" "$2]+=$11}END{for(i in a)print i, a[i], b[i], c[i], d[i], e[i], f[i], g[i], h[i], j[i]|"sort"}' > tmp && mv tmp "${BLASTFOLDER}/firstHits_TMP.txt"
+
+      # uncomment for debugging
+      #echo "BEFORE COL DIV"
+      #cat ${BLASTFOLDER}/firstHits_TMP.txt
+      #echo "END"
+
+      if test -f "${BLASTFOLDER}/clustersSummary.txt"; 
+        then # if file exists, delete it (to avoid appending text to existing file)
+          rm "${BLASTFOLDER}/clustersSummary.txt"
+      fi
+      # Divide weighted values by their corresponding number of reads per species in order to obtain weighted averages for each value, order per decreasing number of reads 
+      cat "${BLASTFOLDER}/firstHits_TMP.txt" | awk '{$5 = $5/$3; $6 = $6/$3; $7 = $7/$3; $8=$8/$3; $9 = $9/$3; $10=$10/$3; $11=$11/$3}1' | sort -t' ' -rnk3 > tmp && mv tmp "${BLASTFOLDER}/clustersSummary.txt"
+      
+      if test -f "${BLASTFOLDER}/speciesTable.csv"; 
+        then # if file exists, delete it (to avoid appending text to existing file)
+          rm "${BLASTFOLDER}/speciesTable.csv"
+      fi
+      # get number of reads from all final clusters
+      totalClusterReads=$(awk -F' ' '{sum+=$3;} END{print sum;}' "${BLASTFOLDER}/clustersSummary.txt")
+      # create comma separated value (csv) file containing species names and their relative percentage based on the number of species-specific cluster reads
+      cat "${BLASTFOLDER}/clustersSummary.txt"|  awk -v b=$totalClusterReads -F" " '{print $1" "$2","100*$3/b}' > tmp && mv tmp "${BLASTFOLDER}/speciesTable.csv"
+      NUM_CLUSTER_READS=$(cat "${BLASTFOLDER}/clustersSummary.txt"|awk '{split($0,a," "); sum += a[3]} END {print sum}') # sum elements of third column (species name is on two columns) to get total number of reads that were used in final clusters
+      # delete temporary file (comment for debugging)     
+      rm "${BLASTFOLDER}/firstHits_TMP.txt"
+      echo -e "Local BLAST output reformatting DONE \n"
+
+# the next commented part is to do the BLAST search on NCBI servers but does not fully work yet
+: <<'END_COMMENT'
+      # The blastn command produces the following error (it does return the output file but some queries seem to be missing):
+       # Error: NCBI C++ Exception:
+       # T0 "/home/coremake/release_build/build/PrepareRelease_Linux64-Centos_JSID_01_560232_130.14.18.6_9008__PrepareRelease_Linux64-Centos_1552331742/c++/compilers/unix/../../src/objects/seq/../seqalign/Score_.cpp", line 90: Error: CScore::C_Value::GetInt(): Invalid choice selection: NCBI-Seqalign::Score.value.real
+
+      # if remote BLAST (on NCBI public server: big updated database but slower 2-5 seconds per query, sometimes more during USA working hours)
+
+      BLAST2startTime=$(date +%s)
+      printf "BLAST of %i consensus sequences against public NCBI nucleotide database " $numClustersInitial
+      echo "(2-5 seconds per query, more during USA working hours)"
+      echo "Some errors might appear without consequences for the results."
+      printf "Please be patient..."
+      blastn -db nt -query "${1}03_clusterConsensus/output.fasta" -out "${1}04_BLASTclusters/remoteBLAST_ID" -remote      # to remove error messages add: > /dev/null 2>&1 
+      RID=$(grep RID "${1}04_BLASTclusters/remoteBLAST_ID" | cut -d' ' -f 2)
+      blast_formatter -rid $RID -out "${1}04_BLASTclusters/remoteBLAST.out" -outfmt '6 qseqid pident qcovs length mismatch gapopen qstart qend evalue bitscore stitle' -num_alignments 100
+      echo "DONE"
+      blast2TimeSecs="$(($(date +%s) - ${BLAST2startTime}))"
+      blastTime2=$(convertPrintSeconds $blast2TimeSecs)
+      echo "$(violet Time Elapsed for remote BLAST in $BC_FOLDER : $blastTime2)" 
+      
+      # reformatting remote BLAST output
+      echo "Started remote BLAST output reformatting"
+      REMOTEBLASTRESULTS="${1}04_BLASTclusters/remoteBLAST.out" 
+      echo 'Retrieving queries (unique read IDs saved as "remote_uniqueIDs.txt")'
+      cut -d$'\t' -f1 "$REMOTEBLASTRESULTS" | uniq > "${BLASTFOLDER}/remote_uniqueIDs.txt"
+      numClustersBLAST=$(wc -l "${BLASTFOLDER}/remote_uniqueIDs.txt" | cut -d' ' -f1)
+      echo "Number of consensus sequences with (unfiltered) BLAST results = $numClustersBLAST"
+      # read each entry of uniqueIDs.txt and use it as grep pattern to find and extract its first occurence in $REMOTEBLASTRESULTS file
+      echo 'Getting first BLAST hit results of each query (saved as "remote_firstHits.txt")'
+      # Extracts line (first hit results) when 1rst field (read ID) changes
+      awk -F'\t' '!a[$1]++' "$REMOTEBLASTRESULTS"  > "${BLASTFOLDER}/remote_firstHits.txt"
+      if test -f "${BLASTFOLDER}/remote_firstHits_TMP.txt"; 
+        then # if file exists, delete it (to avoid appending text to existing file)
+          rm "${BLASTFOLDER}/remote_firstHits_TMP.txt"
+      fi
+      # Read remote_firstHits.txt file 
+      while read line; do
+        # get scientific name of species (two parts)
+        species=$(echo $line | cut -d' ' -f11,12)
+        # get name of cluster
+        name=$(echo $line | cut -d' ' -f1)
+        numReads=$(echo $name | cut -d'_' -f2 | cut -d't' -f2)
+        ID=$(echo $line | cut -d' ' -f2)
+        qcov=$(echo $line | cut -d' ' -f3) # query coverage
+        length=$(echo $line | cut -d' ' -f4)
+	mismatch=$(echo $line | cut -d' ' -f5)
+        gapopen=$(echo $line | cut -d' ' -f6)
+        evalue=$(echo $line | cut -d' ' -f9)
+        bitscore=$(echo $line | cut -d' ' -f10)
+        # uncomment next line for debugging
+        #echo "VALUES DEFINED"
+        # APPLY WEIGHT TO VALUES (multiply by number of reads in cluster) in order to get weighted average by species later on 
+        ID2=$(python -c "print($numReads*$ID)")
+        qcov2=$(python -c "print($numReads*$qcov)")
+        length2=$(python -c "print($numReads*$length)")
+	mismatch2=$(python -c "print($numReads*$mismatch)")
+        gapopen2=$(python -c "print($numReads*$gapopen)")
+        evalue2=$(python -c "print($numReads*$evalue)")
+        bitscore2=$(python -c "print($numReads*$bitscore)")
+        # uncomment next line for debugging
+        #echo "WEIGHT APPLIED"
+        
+       # filter out results with >95% identity and >90% query coverage, add a column with "1"'s only (to later be able to count number of clusters by species), save in firstHits_TMP.txt
+        if (( $(echo "$ID > 95" |bc -l) )) && (( $(echo "$qcov > 90") )); then
+           echo "$species $name $numReads $ID2 $qcov2 $length2 $mismatch2 $gapopen2 $evalue2 ${bitscore2} 1" >> "${BLASTFOLDER}/remote_firstHits_TMP.txt"
+        fi
+      done < "${BLASTFOLDER}/remote_firstHits.txt"
+
+      # uncomment for debugging
+      #echo "BEFORE COL SUMS"
+      #cat "${BLASTFOLDER}/firstHits_TMP.txt"
+      #echo "END"
+
+      # if same species, sum the corresponding numeric values per column (number of reads, as well as previously weighted values), print species name and corresponding sum of reads, sum of last column (to get number of clusters) 
+      cat "${BLASTFOLDER}/remote_firstHits_TMP.txt" | awk '{a[$1" "$2]+=$4; b[$1" "$2]+=$12; c[$1" "$2]+=$5; d[$1" "$2]+=$6; e[$1" "$2]+=$7; f[$1" "$2]+=$8; g[$1" "$2]+=$9; h[$1" "$2]+=$10; j[$1" "$2]+=$11}END{for(i in a)print i, a[i], b[i], c[i], d[i], e[i], f[i], g[i], h[i], j[i]|"sort"}' > tmp && mv tmp "${BLASTFOLDER}/remote_firstHits_TMP.txt"
+
+      # uncomment for debugging
+      #echo "BEFORE COL DIV"
+      #cat "${BLASTFOLDER}/firstHits_TMP.txt"
+      #echo "END"
+
+      if test -f "${BLASTFOLDER}/remote_clustersSummary.txt"; 
+        then # if file exists, delete it (to avoid appending text to existing file)
+          rm "${BLASTFOLDER}/remote_clustersSummary.txt"
+      fi
+      # Divide weighted values by their corresponding number of reads per species in order to obtain weighted averages for each value, order per decreasing number of reads 
+      cat "${BLASTFOLDER}/remote_firstHits_TMP.txt" | awk '{$5 = $5/$3; $6 = $6/$3; $7 = $7/$3; $8=$8/3; $9 = $9/$3; $10=$10/3; $11=$11/$3}1' | sort -t' ' -rnk3 > tmp && mv tmp "${BLASTFOLDER}/remote_clustersSummary.txt"
+      
+      if test -f "${BLASTFOLDER}/remote_speciesTable.csv"; 
+        then # if file exists, delete it (to avoid appending text to existing file)
+          rm "${BLASTFOLDER}/remote_speciesTable.csv"
+      fi
+      # get number of reads from all final clusters
+      totalClusterReads=$(awk -F' ' '{sum+=$3;} END{print sum;}' "${BLASTFOLDER}/remote_clustersSummary.txt")
+      # create comma separated value (csv) file containing species names and their relative percentage based on the number of species-specific cluster reads
+      cat "${BLASTFOLDER}/remote_clustersSummary.txt"|  awk -v b=$totalClusterReads -F" " '{print $1" "$2","100*$3/b}' > tmp && mv tmp "${BLASTFOLDER}/remote_speciesTable.csv"
+      
+      # delete temporary file (comment for debugging)     
+      rm "${BLASTFOLDER}/remote_firstHits_TMP.txt"
+      echo "Remote BLAST output reformatting DONE"
+
+END_COMMENT
+# END of remote BLAST try
+
+     
+      else
+      echo ""
+      echo -e "WARNING: File $1/03_clusterConsensus/output.fastq does not exist and cannot be treated."
+      echo ""
+  fi 
+}
+
+compactLog() {  # Log compacter to get more compact log (in particular remove % progression lines from PoreChop), takes as argument the filename (including path)
+  
+  FOLDER=$(echo "$1" | awk 'BEGIN{FS=OFS="/"}{NF--; print}') # extract folder name without log filename
+  echo -e "Compacting log from $1"
+  # remove unnecessary output from PoreChop
+  # delete from line containing "Loading reads" (not included) until "reads had adapters trimmed from their start" (included)
+  sed '/Loading reads/,/reads had adapters trimmed from their start/{//!d}' "$1" |
+  # delete from line containing "reads had adapters trimmed from their end" (not included) until "reads were split based on middle adapters" (not included)
+  sed "/reads had adapters trimmed from their end/,/reads were split based on middle adapters/{//!d}" |
+  sed "/reads were split based on middle adapters/,/Filtering of reads without adapters with/{//!d}" |
+  # remove escape characters (introduced by coloring scheme)
+  sed 's/\x1b//g' |
+  # remove all other unnecessary codes (introduced by coloring/bold font schemes)
+  sed 's/\[32m//g; s/\[1m//g; s/\[0m//g; s/\[4m//g; s/\[31m//g; s/\[34m//g; s/\[35m//g; s/\[42m//g' >> "${FOLDER}/WIMFcompact.log" 
+  #sed "/Loading reads/,/{/reads loaded/!d}" $1 | head -n 100
+  #sed "/Loading reads/,/reads loaded{/reads loaded/!d}/d" $1 | head -n 100
+  echo -e "Compact log saved as ${FOLDER}/WIMFcompact.log"
+  echo ""
+}
+
+
+BLASTfiltReads () {
+  # if subdirectory does not exist, create it
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER/04_BLAST_filt" ]; then
+  mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER/04_BLAST_filt"
+  fi
+  printf "BLAST filtered reads against local database... "
+  blastn -query "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt_NanoFilt/filtSeqs.fasta" -db "${BLAST_DB_INDEX}" -num_threads $THREADS_BLAST -outfmt '6 qseqid pident qcovs length mismatch gapopen qstart qend evalue bitscore stitle' -num_alignments 100 -out "${RUN_FOLDER}_WIMF/$BC_FOLDER/04_BLAST_filt/BLASTresults.txt" 
+  echo "DONE"
+}
+# the following function is not used in the current code of this script but was used with results from filtered reads (not consensus sequences) to get an idea of the BLAST hits
+# get unique read names (queries) from BLAST results file (BLAST of FASTA file against rbcL/16S local database), 
+# extract first hit BLAST results from each query, determine all species present, count number of hits per species
+formatBLASToutput () {
+  echo "Started BLAST output reformatting"
+  BLASTRESULTS="${RUN_FOLDER}_WIMF/$BC_FOLDER/04_BLAST_filt/BLASTresults.txt"
+  BLASTFOLDER="${RUN_FOLDER}_WIMF/$BC_FOLDER/04_BLAST_filt"
+  echo 'Retrieving queries (unique read IDs saved as "uniqueIDs.txt")'
+  cut -d$'\t' -f1 "$BLASTRESULTS" | uniq > "${BLASTFOLDER}/uniqueIDs.txt"
+  totalReads=$(wc -l "${BLASTFOLDER}/uniqueIDs.txt" | cut -d' ' -f1)
+  echo "Number of reads with BLAST results = $totalReads"
+  # read each entry of uniqueIDs.txt and use it as grep pattern to find and extract its first occurence in $BLASTRESULTS file
+  echo 'Getting first BLAST hit results of each query (saved as "firstHits.txt")'
+  # Extracts line (first hit results) when 1rst field (read ID) changes
+  awk -F'\t' '!a[$1]++' "$BLASTRESULTS"  >> "${BLASTFOLDER}/firstHits.txt"
+  # get all species (once) from firstHits.txt
+  cat "${BLASTFOLDER}/firstHits.txt" | cut -d$'\t' -f11 | cut -d" " -f1,2 | sort | uniq > "${BLASTFOLDER}/allSpecies.txt"
+  # Print each species and its count in decreasing order
+  printf 'Building species occurence table... '
+  while read p; do printf "$p "; grep -c "$p" "${BLASTFOLDER}/firstHits.txt"; done <"${BLASTFOLDER}/allSpecies.txt" | sort -t' ' -k3,3rn > "${BLASTFOLDER}/speciesOccurences.txt"
+  echo 'DONE'
+}
+
+makeFilt1Report() {
+  printf "Building report for >Q$FILTER1_QUALITY_THRESHOLD filtered sample ..."
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT" ]; then # create folder if it doesn't exist
+             mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT"
+  fi
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files" ]; then # create folder if it doesn't exist
+             mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files"
+  fi
+  cp "$WIMF_INSTALL_PATH/ReportTemplates/report_part1" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT"
+  cp "$WIMF_INSTALL_PATH/ReportTemplates/report_part2" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT"
+  cp "$WIMF_INSTALL_PATH/ReportTemplates/Chart.min.js" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files" # copy canvas to HTML_files folder
+  cp "${RUN_FOLDER}_WIMF/$BC_FOLDER/01_QC_NanoPlot/LengthvsQualityScatterPlot_dot.png" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files" # copy raw data plot image
+  cp "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt_NanoFilt/LengthvsQualityScatterPlot_dot.png" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files/LengthvsQualityScatterPlot_dotFilt.png" # copy filtered data plot
+  if test -f "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"; 
+        then # if file exists, delete it (to avoid appending text to existing file)
+        rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  fi
+  
+  # Build HTML table of cluster statistics from "clustersSummary.txt" for report
+  HTML_table=" <tr>\n  " # will contain the contents of table in HTML format 
+  while read line; do # for each line of "clustersSummary.txt"
+        # get scientific name of species (two parts)
+        T_species=$(echo $line | cut -d' ' -f1,2)
+        # get number of reads in cluster
+        T_numReads=$(echo $line | cut -d' ' -f3)
+	T_numClusters=$(echo $line | cut -d' ' -f4)
+        T_percID=$(echo $line | cut -d' ' -f5)
+        T_qcov=$(echo $line | cut -d' ' -f6)
+        T_qLength=$(echo $line | cut -d' ' -f7)
+        T_mismatch=$(echo $line | cut -d' ' -f8)
+        T_gapOpen=$(echo $line | cut -d' ' -f9)
+        T_evalue=$(echo $line | cut -d' ' -f10)
+        T_bitscore=$(echo $line | cut -d' ' -f11)
+        HTML_table=$(echo -e "$HTML_table<td><i>$T_species</i></td>\n  <td>$T_numReads</td>\n  <td>$T_numClusters</td>\n  <td>$T_percID</td>\n  <td>$T_qcov</td>\n  <td>$T_qLength</td>\n  <td>$T_mismatch</td>\n  <td>$T_gapOpen</td>\n <td>$T_evalue</td>\n  <td>$T_bitscore</td>\n </tr>\n")
+      done < "${BLASTFOLDER}/clustersSummary.txt"
+
+  HTML_table=$(echo -e "$HTML_table\b\b  </tr>")
+
+  # Handle species evidence barplot
+  FULL_COLOR_TABLE=$(echo "\"#ff7c4d\",\"#ffb84d\",\"#fff04d\",\"#deff4d\",\"#9dff4d\",\"#49d89f\",\"#49d8cc\",\"#49add8\",\"#8949d8\",\"#d149d8\",\"#d849ad\",\"#d8496f\",\"#ff7c4d\",\"#ffb84d\",\"#fff04d\",\"#deff4d\",\"#9dff4d\",\"#49d89f\",\"#49d8cc\",\"#49add8\",\"#8949d8\",\"#d149d8\",\"#d849ad\",\"#d8496f\",\"#ff7c4d\",\"#ffb84d\",\"#fff04d\",\"#deff4d\",\"#9dff4d\",\"#49d89f\",\"#49d8cc\",\"#49add8\",\"#8949d8\",\"#d149d8\",\"#d849ad\",\"#d8496f\",\"#ff7c4d\",\"#ffb84d\",\"#fff04d\",\"#deff4d\",\"#9dff4d\",\"#49d89f\",\"#49d8cc\",\"#49add8\",\"#8949d8\",\"#d149d8\",\"#d849ad\",\"#d8496f\"") # 12 colors repeated 4 times (so far there seems to be less than 12 species detected per sample)
+  #echo "FULL_COLOR_TABLE="
+  #echo $FULL_COLOR_TABLE
+  SP_TABLE="${RUN_FOLDER}_WIMF/$BC_FOLDER/04_BLASTclusters/speciesTable.csv"
+  #echo "SP_TABLE="
+  #cat "$SP_TABLE"
+  NUM_SPECIES_DETECTED=$(wc -l "$SP_TABLE" | cut -d" " -f1)
+  #echo "NUM_SPECIES = "
+  #echo $NUM_SPECIES_DETECTED
+  if [ $NUM_SPECIES_DETECTED -eq 1 ]; then
+    COLOR_TABLE=$(echo "\"#ff7c4d\"") 
+    SPECIES_NAMES=$(cat "$SP_TABLE" | cut -d"," -f1)
+    SPECIES_NAMES=$(echo "\"$SPECIES_NAMES\"") # add quotes around species name
+    SPECIES_PERC=$(cat "$SP_TABLE" | cut -d"," -f2)
+   # echo "SPECIES_NAMES"
+   # echo $SPECIES_NAMES
+   # echo "SPECIES_PERC"
+   # echo $SPECIES_PERC
+  else
+    COLOR_TABLE=$(echo $FULL_COLOR_TABLE | cut -d "," -f1-$NUM_SPECIES_DETECTED|tr ' ' ',') 
+    #echo "COLOR_TABLE="
+    #echo $COLOR_TABLE
+    SPECIES_NAMES=$(cat "$SP_TABLE" | cut -d"," -f1|tr '\n' ',')
+    #echo "SPECIES_NAMES1="
+    #echo $SPECIES_NAMES
+    SPECIES_NAMES=${SPECIES_NAMES::-1}  # remove last character
+    #echo "SPECIES_NAMES2="
+    #echo $SPECIES_NAMES
+    SPECIES_NAMES=$(echo "\"$SPECIES_NAMES"|sed "s/,/\",\"/g") # add quotes around species names
+    SPECIES_NAMES=$(echo "$SPECIES_NAMES\"") # add last quote character 
+    #echo "SPECIES_NAMES3FINAL="
+    #echo $SPECIES_NAMES
+    SPECIES_PERC=$(cat "$SP_TABLE" | cut -d"," -f2|tr ' ' ','|tr '\n' ',')
+    SPECIES_PERC=${SPECIES_PERC::-1}
+    #echo "SPECIES_PERC="
+    #echo $SPECIES_PERC
+  fi
+
+  cat "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/report_part1" > "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  echo "$HTML_table" >> "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  cat "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/report_part2" >> "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  cat "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport" | sed "s|SEQ_FOLDER|${RUN_FOLDER}_WIMF|g" | sed "s|FULL_USER_COMMAND|${FULL_COMMAND}|g" |  sed "s|FULL_USER_COMMAND|${USER_COMMAND}|g" | sed "s|BC_FOLDER|$BC_FOLDER|g" | sed "s/CLUSTER_READS/$NUM_CLUSTER_READS/g" | sed "s/NUM_CLUSTERS/$numClustersFinal/g" | sed "s/numRawReads1/$numRawReads1/g" | sed "s/meanReadQ1/$meanReadQ/g" | sed "s/meanReadLength1/$meanReadLength/g" | sed "s/readN501/$readN50/g" | sed "s/totalBases1/$totalBases/g" | sed "s|PATH2RAWPLOT|HTML_files\/LengthvsQualityScatterPlot_dot.png|g" |sed "s/numFiltReads2/$numFiltReads1/g" |sed "s/meanReadQ2/$meanReadQ2/g" | sed "s/meanReadLength2/$meanReadLength2/g" | sed "s/readN502/$readN502/g" | sed "s/totalBases2/$totalBases2/g" |sed "s|PATH2FILTPLOT|HTML_files\/LengthvsQualityScatterPlot_dotFilt.png|g" > "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport2"
+  #echo "tempReport4="
+  #cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport2
+  # replace NUM_SPECIES_DETECTED, COLOR_TABLE, SPECIES_NAMES and SPECIES_PERC by their value in HTML report
+  cat "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport2" | sed "s/NUM_SPECIES_DETECTED/$NUM_SPECIES_DETECTED/g" | sed "s/COLOR_TABLE/$COLOR_TABLE/g" | sed "s/SPECIES_NAMES/$SPECIES_NAMES/g" | sed "s/SPECIES_PERC/$SPECIES_PERC/g" > "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport3"
+ 
+  #echo "tempReport5="
+  #cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport3
+  mv "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport3" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/report.html"
+  #echo "report.html="
+  #cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/report.html
+  rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport2"
+  rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/report_part1"  
+  rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/report_part2"
+  echo "DONE"
+}
+
+
+makeFilt2Report() {
+ printf "Building report for >Q${FILTER2_QUALITY_THRESHOLD} filtered sample ..."
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT" ]; then # create folder if it doesn't exist
+             mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT"
+  fi
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files" ]; then # create folder if it doesn't exist
+             mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files"
+  fi
+  cp "$WIMF_INSTALL_PATH/ReportTemplates/reportFilt2_part1" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT"
+  cp "$WIMF_INSTALL_PATH/ReportTemplates/reportFilt2_part2" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT"
+  cp "$WIMF_INSTALL_PATH/ReportTemplates/Chart.min.js" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files" # copy canvas to HTML_files folder
+  cp "${RUN_FOLDER}_WIMF/$BC_FOLDER/01_QC_NanoPlot/LengthvsQualityScatterPlot_dot.png" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files" # copy raw data plot image
+  cp "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt2_NanoFilt/LengthvsQualityScatterPlot_dot.png" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files/LengthvsQualityScatterPlot_dotFilt.png" # copy filtered data plot
+
+  if test -f "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"; 
+        then # if file exists, delete it (to avoid appending text to existing file)
+        rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  fi
+  
+  # Build HTML table of cluster statistics from "clustersSummary.txt" for report
+  HTML_table=" <tr>\n  " # will contain the contents of table in HTML format 
+  while read line; do # for each line of "clustersSummary.txt"
+        # get scientific name of species (two parts)
+        T_species=$(echo $line | cut -d' ' -f1,2)
+        # get number of reads in cluster
+        T_numReads=$(echo $line | cut -d' ' -f3)
+	T_numClusters=$(echo $line | cut -d' ' -f4)
+        T_percID=$(echo $line | cut -d' ' -f5)
+        T_qcov=$(echo $line | cut -d' ' -f6)
+        T_qLength=$(echo $line | cut -d' ' -f7)
+        T_mismatch=$(echo $line | cut -d' ' -f8)
+        T_gapOpen=$(echo $line | cut -d' ' -f9)
+        T_evalue=$(echo $line | cut -d' ' -f10)
+        T_bitscore=$(echo $line | cut -d' ' -f11)
+        HTML_table=$(echo -e "$HTML_table<td><i>$T_species</i></td>\n  <td>$T_numReads</td>\n  <td>$T_numClusters</td>\n  <td>$T_percID</td>\n  <td>$T_qcov</td>\n  <td>$T_qLength</td>\n  <td>$T_mismatch</td>\n  <td>$T_gapOpen</td>\n <td>$T_evalue</td>\n  <td>$T_bitscore</td>\n </tr>\n")
+      done < "${BLASTFOLDER}/clustersSummary.txt"
+
+  HTML_table=$(echo -e "$HTML_table\b\b  </tr>")
+
+  # Handle species evidence barplot
+  FULL_COLOR_TABLE=$(echo "\"#ff7c4d\",\"#ffb84d\",\"#fff04d\",\"#deff4d\",\"#9dff4d\",\"#49d89f\",\"#49d8cc\",\"#49add8\",\"#8949d8\",\"#d149d8\",\"#d849ad\",\"#d8496f\",\"#ff7c4d\",\"#ffb84d\",\"#fff04d\",\"#deff4d\",\"#9dff4d\",\"#49d89f\",\"#49d8cc\",\"#49add8\",\"#8949d8\",\"#d149d8\",\"#d849ad\",\"#d8496f\",\"#ff7c4d\",\"#ffb84d\",\"#fff04d\",\"#deff4d\",\"#9dff4d\",\"#49d89f\",\"#49d8cc\",\"#49add8\",\"#8949d8\",\"#d149d8\",\"#d849ad\",\"#d8496f\",\"#ff7c4d\",\"#ffb84d\",\"#fff04d\",\"#deff4d\",\"#9dff4d\",\"#49d89f\",\"#49d8cc\",\"#49add8\",\"#8949d8\",\"#d149d8\",\"#d849ad\",\"#d8496f\"") # 12 colors repeated 4 times (so far there seems to be less than 12 species detected per sample)
+  #echo "FULL_COLOR_TABLE="
+  #echo $FULL_COLOR_TABLE
+  SP_TABLE="${RUN_FOLDER}_WIMF/$BC_FOLDER/04_BLASTclusters/speciesTable.csv"
+  #echo "SP_TABLE="
+  #cat $SP_TABLE
+  NUM_SPECIES_DETECTED=$(wc -l "$SP_TABLE" | cut -d" " -f1)
+  #echo "NUM_SPECIES = "
+  #echo $NUM_SPECIES_DETECTED
+  if [ $NUM_SPECIES_DETECTED -eq 1 ]; then
+    COLOR_TABLE=$(echo "\"#ff7c4d\"") 
+    SPECIES_NAMES=$(cat "$SP_TABLE" | cut -d"," -f1)
+    SPECIES_NAMES=$(echo "\"$SPECIES_NAMES\"") # add quotes around species name
+    SPECIES_PERC=$(cat "$SP_TABLE" | cut -d"," -f2)
+   # echo "SPECIES_NAMES"
+   # echo $SPECIES_NAMES
+   # echo "SPECIES_PERC"
+   # echo $SPECIES_PERC
+  else
+    COLOR_TABLE=$(echo $FULL_COLOR_TABLE | cut -d "," -f1-$NUM_SPECIES_DETECTED|tr ' ' ',') 
+    #echo "COLOR_TABLE="
+    #echo $COLOR_TABLE
+    SPECIES_NAMES=$(cat "$SP_TABLE" | cut -d"," -f1|tr '\n' ',')
+    #echo "SPECIES_NAMES1="
+    #echo $SPECIES_NAMES
+    SPECIES_NAMES=${SPECIES_NAMES::-1}  # remove last character
+    #echo "SPECIES_NAMES2="
+    #echo $SPECIES_NAMES
+    SPECIES_NAMES=$(echo "\"$SPECIES_NAMES"|sed "s/,/\",\"/g") # add quotes around species names
+    SPECIES_NAMES=$(echo "$SPECIES_NAMES\"") # add last quote character 
+    #echo "SPECIES_NAMES3FINAL="
+    #echo $SPECIES_NAMES
+    SPECIES_PERC=$(cat "$SP_TABLE" | cut -d"," -f2|tr ' ' ','|tr '\n' ',')
+    SPECIES_PERC=${SPECIES_PERC::-1}
+    #echo "SPECIES_PERC="
+    #echo $SPECIES_PERC
+  fi
+
+  cat "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/reportFilt2_part1" > "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  #echo "tempReport1="
+  #cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport
+  echo "$HTML_table" >> "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  #echo "tempReport2="
+  #cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport
+  cat "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/reportFilt2_part2" >> "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  #echo "tempReport3="
+  #cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport
+  cat "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport" | sed "s|SEQ_FOLDER|${RUN_FOLDER}_WIMF|g" | sed "s|FULL_USER_COMMAND|${FULL_COMMAND}|g" | sed "s|BC_FOLDER|$BC_FOLDER|g" | sed "s/CLUSTER_READS/$NUM_CLUSTER_READS/g" | sed "s/NUM_CLUSTERS/$numClustersFinal/g" | sed "s/numRawReads1/$numRawReads1/g" | sed "s/meanReadQ1/$meanReadQ/g" | sed "s/meanReadLength1/$meanReadLength/g" | sed "s/readN501/$readN50/g" | sed "s/totalBases1/$totalBases/g" | sed "s|PATH2RAWPLOT|HTML_files\/LengthvsQualityScatterPlot_dot.png|g" |sed "s/numFiltReads3/$numFiltReads3/g" |sed "s/meanReadQ3/$meanReadQ3/g" | sed "s/meanReadLength3/$meanReadLength3/g" | sed "s/readN503/$readN503/g" | sed "s/totalBases3/$totalBases3/g" |sed "s|PATH2FILTPLOT|HTML_files\/LengthvsQualityScatterPlot_dotFilt.png|g" > "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport2"
+  #echo "tempReport4="
+  #cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport2
+  # replace NUM_SPECIES_DETECTED, COLOR_TABLE, SPECIES_NAMES and SPECIES_PERC by their value in HTML report
+  cat "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport2" | sed "s/NUM_SPECIES_DETECTED/$NUM_SPECIES_DETECTED/g" | sed "s/COLOR_TABLE/$COLOR_TABLE/g" | sed "s/SPECIES_NAMES/$SPECIES_NAMES/g" | sed "s/SPECIES_PERC/$SPECIES_PERC/g" > "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport3"
+  #echo "tempReport5="
+  #cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport3
+  mv "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport3" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/report.html"
+  #echo "report.html="
+  #cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/report.html
+  if test -f "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"; 
+    then # if file exists, delete it (to avoid appending text to existing file)
+      rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  fi
+    rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport2"
+    rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/reportFilt2_part1"  
+  rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/reportFilt2_part2"
+  echo "DONE"
+
+}
+
+makeFilt3Report() {
+printf "Building report >Q${FILTER3_QUALITY_THRESHOLD} filtered sample ..."
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT" ]; then # create folder if it doesn't exist
+             mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT"
+  fi
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files" ]; then # create folder if it doesn't exist
+             mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files"
+  fi
+  cp "$WIMF_INSTALL_PATH/ReportTemplates/reportFilt3_part1" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT"
+  cp "$WIMF_INSTALL_PATH/ReportTemplates/reportFilt3_part2" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT"
+  cp "$WIMF_INSTALL_PATH/ReportTemplates/Chart.min.js" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files" # copy canvas to HTML_files folder
+  cp "${RUN_FOLDER}_WIMF/$BC_FOLDER/01_QC_NanoPlot/LengthvsQualityScatterPlot_dot.png" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files" # copy raw data plot image
+  cp "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt3_NanoFilt/LengthvsQualityScatterPlot_dot.png" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files/LengthvsQualityScatterPlot_dotFilt.png" # copy filtered data plot
+
+  if test -f "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"; 
+        then # if file exists, delete it (to avoid appending text to existing file)
+        rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  fi
+  
+  # Build HTML table of cluster statistics from "clustersSummary.txt" for report
+  HTML_table=" <tr>\n  " # will contain the contents of table in HTML format 
+  while read line; do # for each line of "clustersSummary.txt"
+        # get scientific name of species (two parts)
+        T_species=$(echo $line | cut -d' ' -f1,2)
+        # get number of reads in cluster
+        T_numReads=$(echo $line | cut -d' ' -f3)
+	T_numClusters=$(echo $line | cut -d' ' -f4)
+        T_percID=$(echo $line | cut -d' ' -f5)
+        T_qcov=$(echo $line | cut -d' ' -f6)
+        T_qLength=$(echo $line | cut -d' ' -f7)
+        T_mismatch=$(echo $line | cut -d' ' -f8)
+        T_gapOpen=$(echo $line | cut -d' ' -f9)
+        T_evalue=$(echo $line | cut -d' ' -f10)
+        T_bitscore=$(echo $line | cut -d' ' -f11)
+        HTML_table=$(echo -e "$HTML_table<td><i>$T_species</i></td>\n  <td>$T_numReads</td>\n  <td>$T_numClusters</td>\n  <td>$T_percID</td>\n  <td>$T_qcov</td>\n  <td>$T_qLength</td>\n  <td>$T_mismatch</td>\n  <td>$T_gapOpen</td>\n <td>$T_evalue</td>\n  <td>$T_bitscore</td>\n </tr>\n")
+      done < "${BLASTFOLDER}/clustersSummary.txt"
+
+  HTML_table=$(echo -e "$HTML_table\b\b  </tr>")
+
+  # Handle species evidence barplot
+  FULL_COLOR_TABLE=$(echo "\"#ff7c4d\",\"#ffb84d\",\"#fff04d\",\"#deff4d\",\"#9dff4d\",\"#49d89f\",\"#49d8cc\",\"#49add8\",\"#8949d8\",\"#d149d8\",\"#d849ad\",\"#d8496f\",\"#ff7c4d\",\"#ffb84d\",\"#fff04d\",\"#deff4d\",\"#9dff4d\",\"#49d89f\",\"#49d8cc\",\"#49add8\",\"#8949d8\",\"#d149d8\",\"#d849ad\",\"#d8496f\",\"#ff7c4d\",\"#ffb84d\",\"#fff04d\",\"#deff4d\",\"#9dff4d\",\"#49d89f\",\"#49d8cc\",\"#49add8\",\"#8949d8\",\"#d149d8\",\"#d849ad\",\"#d8496f\",\"#ff7c4d\",\"#ffb84d\",\"#fff04d\",\"#deff4d\",\"#9dff4d\",\"#49d89f\",\"#49d8cc\",\"#49add8\",\"#8949d8\",\"#d149d8\",\"#d849ad\",\"#d8496f\"") # 12 colors repeated 4 times (so far there seems to be less than 12 species detected per sample)
+  #echo "FULL_COLOR_TABLE="
+  #echo $FULL_COLOR_TABLE
+  SP_TABLE="${RUN_FOLDER}_WIMF/$BC_FOLDER/04_BLASTclusters/speciesTable.csv"
+  #echo "SP_TABLE="
+  #cat $SP_TABLE
+  NUM_SPECIES_DETECTED=$(wc -l "$SP_TABLE" | cut -d" " -f1)
+  #echo "NUM_SPECIES = "
+  #echo $NUM_SPECIES_DETECTED
+  if [ $NUM_SPECIES_DETECTED -eq 1 ]; then
+    COLOR_TABLE=$(echo "\"#ff7c4d\"") 
+    SPECIES_NAMES=$(cat "$SP_TABLE" | cut -d"," -f1)
+    SPECIES_NAMES=$(echo "\"$SPECIES_NAMES\"") # add quotes around species name
+    SPECIES_PERC=$(cat "$SP_TABLE" | cut -d"," -f2)
+   # echo "SPECIES_NAMES"
+   # echo $SPECIES_NAMES
+   # echo "SPECIES_PERC"
+   # echo $SPECIES_PERC
+  else
+    COLOR_TABLE=$(echo $FULL_COLOR_TABLE | cut -d "," -f1-$NUM_SPECIES_DETECTED|tr ' ' ',') 
+    #echo "COLOR_TABLE="
+    #echo $COLOR_TABLE
+    SPECIES_NAMES=$(cat "$SP_TABLE" | cut -d"," -f1|tr '\n' ',')
+    #echo "SPECIES_NAMES1="
+    #echo $SPECIES_NAMES
+    SPECIES_NAMES=${SPECIES_NAMES::-1}  # remove last character
+    #echo "SPECIES_NAMES2="
+    #echo $SPECIES_NAMES
+    SPECIES_NAMES=$(echo "\"$SPECIES_NAMES"|sed "s/,/\",\"/g") # add quotes around species names
+    SPECIES_NAMES=$(echo "$SPECIES_NAMES\"") # add last quote character 
+    #echo "SPECIES_NAMES3FINAL="
+    #echo "$SPECIES_NAMES"
+    SPECIES_PERC=$(cat "$SP_TABLE}" | cut -d"," -f2|tr ' ' ','|tr '\n' ',')
+    SPECIES_PERC=${SPECIES_PERC::-1}
+    #echo "SPECIES_PERC="
+    #echo $SPECIES_PERC
+  fi
+
+  cat "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/reportFilt3_part1" > "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  #echo "tempReport1="
+  #cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport
+  echo "$HTML_table" >> "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  #echo "tempReport2="
+  #cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport
+  cat "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/reportFilt3_part2" >> "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  #echo "tempReport3="
+  #cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport
+  cat "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport" | sed "s|SEQ_FOLDER|${RUN_FOLDER}_WIMF|g" | sed "s|FULL_USER_COMMAND|${FULL_COMMAND}|g" | sed "s|BC_FOLDER|$BC_FOLDER|g" | sed "s/CLUSTER_READS/$NUM_CLUSTER_READS/g" | sed "s/NUM_CLUSTERS/$numClustersFinal/g" | sed "s/numRawReads1/$numRawReads1/g" | sed "s/meanReadQ1/$meanReadQ/g" | sed "s/meanReadLength1/$meanReadLength/g" | sed "s/readN501/$readN50/g" | sed "s/totalBases1/$totalBases/g" | sed "s|PATH2RAWPLOT|HTML_files\/LengthvsQualityScatterPlot_dot.png|g" |sed "s/numFiltReads2/$numFiltReads1/g" |sed "s/meanReadQ4/$meanReadQ4/g" | sed "s/meanReadLength4/$meanReadLength4/g" | sed "s/readN504/$readN504/g" | sed "s/totalBases4/$totalBases4/g" |sed "s|PATH2FILTPLOT|HTML_files\/LengthvsQualityScatterPlot_dotFilt.png|g" > "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  #echo "tempReport4="
+  #cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport
+  # replace NUM_SPECIES_DETECTED, COLOR_TABLE, SPECIES_NAMES and SPECIES_PERC by their value in HTML report
+  cat "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport" | sed "s/NUM_SPECIES_DETECTED/$NUM_SPECIES_DETECTED/g" | sed "s/COLOR_TABLE/$COLOR_TABLE/g" | sed "s/SPECIES_NAMES/$SPECIES_NAMES/g" | sed "s/SPECIES_PERC/$SPECIES_PERC/g" > "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport2"
+ # echo "tempReport5="
+ # cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport2
+  mv "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport2" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/report.html"
+  #echo "report.html="
+  #cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/report.html
+  if test -f "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"; 
+    then # if file exists, delete it (to avoid appending text to existing file)
+      rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  fi
+    rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/reportFilt3_part1"  
+  rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/reportFilt3_part2"
+  echo "DONE"
+}
+
+makeLowFiltReport() {
+printf "Building report for sample without enough >Q$FILTER1_QUALITY_THRESHOLD filtered reads..."
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT" ]; then # create folder if it doesn't exist
+             mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT"
+  fi
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files" ]; then # create folder if it doesn't exist
+             mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files"
+  fi
+  cp "$WIMF_INSTALL_PATH/ReportTemplates/report_filt.html" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT"
+  cp "${RUN_FOLDER}_WIMF/$BC_FOLDER/01_QC_NanoPlot/LengthvsQualityScatterPlot_dot.png" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files" # copy raw data plot image
+  cp "${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt_NanoFilt/LengthvsQualityScatterPlot_dot.png" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files/LengthvsQualityScatterPlot_dotFilt.png" # copy filtered data plot
+
+  if test -f "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"; 
+        then # if file exists, delete it (to avoid appending text to existing file)
+        rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  fi
+  
+  cat "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/report_filt.html" > "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  #echo "tempReport1="
+  #cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport
+  cat "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport" | sed "s|SEQ_FOLDER|${RUN_FOLDER}_WIMF|g" | sed "s|FULL_USER_COMMAND|${FULL_COMMAND}|g" | sed "s|BC_FOLDER|$BC_FOLDER|g" | sed "s/numRawReads1/$numRawReads1/g" | sed "s/meanReadQ1/$meanReadQ/g" | sed "s/meanReadLength1/$meanReadLength/g" | sed "s/readN501/$readN50/g" | sed "s/totalBases1/$totalBases/g" | sed "s|PATH2RAWPLOT|HTML_files\/LengthvsQualityScatterPlot_dot.png|g" |sed "s/numFiltReads2/$numFiltReads1/g" |sed "s/meanReadQ2/$meanReadQ2/g" | sed "s/meanReadLength2/$meanReadLength2/g" | sed "s/readN502/$readN502/g" | sed "s/totalBases2/$totalBases2/g" |sed "s|PATH2FILTPLOT|HTML_files\/LengthvsQualityScatterPlot_dotFilt.png|g" > "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  mv "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/report.html"
+  #echo "report.html="
+  #cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/report.html
+  if test -f "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"; 
+    then # if file exists, delete it (to avoid appending text to existing file)
+      rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  fi
+    rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/report_filt.html"
+  echo "DONE"
+}
+
+makeRawReport() {
+printf "Building report for sample without enough raw reads..."
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT" ]; then # create folder if it doesn't exist
+             mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT"
+  fi
+  if [ ! -d "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files" ]; then # create folder if it doesn't exist
+             mkdir "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files"
+  fi
+  cp "$WIMF_INSTALL_PATH/ReportTemplates/report_raw.html" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT"
+  cp "${RUN_FOLDER}_WIMF/$BC_FOLDER/01_QC_NanoPlot/LengthvsQualityScatterPlot_dot.png" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/HTML_files" # copy raw data plot image
+  if test -f "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"; 
+        then # if file exists, delete it (to avoid appending text to existing file)
+        rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  fi
+  cat "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/report_raw.html" > "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  #echo "tempReport4="; cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport
+  cat "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport" | sed "s|SEQ_FOLDER|${RUN_FOLDER}_WIMF|g" | sed "s|FULL_USER_COMMAND|${FULL_COMMAND}|g" |  sed "s|BC_FOLDER|$BC_FOLDER|g" | sed "s/numRawReads1/$numRawReads1/g" | sed "s/meanReadQ1/$meanReadQ/g" | sed "s/meanReadLength1/$meanReadLength/g" | sed "s/readN501/$readN50/g" | sed "s/totalBases1/$totalBases/g" | sed "s|PATH2RAWPLOT|HTML_files\/LengthvsQualityScatterPlot_dot.png|g" > "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport2"
+  #echo "tempReport5="
+  #cat "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport2"
+  mv "${RUN_FOLDER}_WIMF/${BC_FOLDER}/REPORT/tempReport2" "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/report.html"
+  #echo "report.html="
+  #cat ${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/report.html
+  if test -f "${RUN_FOLDER}_WIMF/${BC_FOLDER}/REPORT/tempReport"; 
+    then # if file exists, delete it (to avoid appending text to existing file)
+      rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/tempReport"
+  fi
+    rm "${RUN_FOLDER}_WIMF/$BC_FOLDER/REPORT/report_raw.html"
+  echo "DONE"
+}
+
+####################################### end of Function definitions ###############################################################
+
+# START OF MAIN CODE
+
+unusedSamples=0 # variable to count the number of unused samples (<10 raw reads)
+lowRawSamples=0 # variable to count the number of samples which did not have enough raw reads to carry the analysis but enough to plot raw data  (10 < number of reads < 200 by default)
+lowFiltSamples=0 # variable to count the number of samples which did not have enough raw reads to carry the analysis but enough to plot raw data  (10 < number of reads < 200 by default)
+avgSamples=0 # variable to count the number of "average" samples which went through the whole analysis using only the first quality quality filter (>Q10)
+HQSamples=0 # variable to count the number of "very high quality" samples which went through the whole analysis using the first two quality filters (>Q12)
+Filt3Samples=0 # variable to count the number of "extremely high quality" samples which went through the whole analysis using all three quality filters (>Q13)
+
+# for loop to go through all BC folders
+
+fullTimeSecs=0 # Timer for entire sequencing run analysis
+for ((i=0;i<$numFolders;i++))
+    
+   do 
+     startTime=$(date +%s)
+               #i=2
+     catFASTQs "${folderList[$i]}"
+     preCheck
+     if [ "$earlyStop" -eq 0 ] ;then
+       qualityControl 
+       if [ "$enoughRawReads" -eq 0 ] ;then
+         lowRawSamples=$((lowRawSamples+1)) # increment by one each time there's a BC folder containing less than 200 raw reads (plots available for raw data but analysis stops here)
+         echo ""
+         echo -e "$(red Analysis stopped for $BC_FOLDER \(not enough raw reads\))"
+         echo -e "$(red Report on raw data moved to ${RUN_FOLDER}_WIMF_QC\/LowRawReadsSamples\/$BC_FOLDER\/)" 
+         echo ""
+       else
+         filter1Reads
+         if [ "$enoughFiltReads" -eq 0 ] ;then # in case there are not enough filtered reads:
+           makeLowFiltReport # make report for sample without enough filtered reads     
+           echo -e "$BC_FOLDER		Total number of filtered reads = $numFiltReads" >> "${lowFiltlog}"
+           if [ ! -d "${RUN_FOLDER}_WIMF/LowFiltReadsSamples" ]; then # create folder if it doesn't exist
+             mkdir "${RUN_FOLDER}_WIMF/LowFiltReadsSamples"
+           fi
+           if [ ! -d "${RUN_FOLDER}_WIMF/LowFiltReadsSamples/$BC_FOLDER" ]; then # create subfolder if it doesn't exist
+             mkdir "${RUN_FOLDER}_WIMF/LowFiltReadsSamples/$BC_FOLDER" 
+           fi
+           mv "${RUN_FOLDER}_WIMF/$BC_FOLDER"/* "${RUN_FOLDER}_WIMF/LowFiltReadsSamples/$BC_FOLDER"
+           rm -r "${RUN_FOLDER}_WIMF/$BC_FOLDER" # remove the empty BC_FOLDER
+           echo ""
+           echo -e "$(red Analysis stopped for $BC_FOLDER \(not enough filtered reads\))"
+           echo ""
+           echo -e "$(red Report on raw\+filtered data moved to ${RUN_FOLDER}_WIMF_QC\/LowFiltReadsSamples\/$BC_FOLDER\/)"
+           lowFiltSamples=$((lowFiltSamples+1)) # increment by one each time there's a BC folder containing less than 100 filtered reads (plots available for raw+filtered data but analysis stops here)
+           echo ""
+         else
+           filtReadsFASTQtoFASTA 
+           if [ "$numFiltReads" -le $MAX_CLUSTER ]; then # default maximum number of filtered reads (filter1) for clustering set to MAX_CLUSTER
+             clusterConsensus
+             treatClusters "${RUN_FOLDER}_WIMF/$BC_FOLDER"
+             avgSamples=$((avgSamples+1)) # increment by one each time there's a BC folder that went through the analysis with the > filter1 quality threshold (without needing second and third filtering ste)ps
+             makeFilt1Report # make report for typical sample (filtered at filter1)
+             if [ ! -d "${RUN_FOLDER}_WIMF/Filt1_Samples" ]; then # create folder if it doesn't exist
+               mkdir "${RUN_FOLDER}_WIMF/Filt1_Samples"
+             fi
+             if [ ! -d "${RUN_FOLDER}_WIMF/Filt1_Samples/$BC_FOLDER" ]; then # create subfolder if it doesn't exist
+               mkdir "${RUN_FOLDER}_WIMF/Filt1_Samples/$BC_FOLDER" 
+             fi
+             mv "${RUN_FOLDER}_WIMF/$BC_FOLDER"/* "${RUN_FOLDER}_WIMF/Filt1_Samples/$BC_FOLDER"
+             rm -r "${RUN_FOLDER}_WIMF/$BC_FOLDER" # remove the empty BC_FOLDER
+       
+             # uncomment to delete FASTQ file of all filtered sequences
+             # rm ${RUN_FOLDER}_WIMF/$BC_FOLDER/02_Filt_NanoFilt/filtSeqs.fastq
+           else  # if more than MAX_CLUSTER filtered reads
+             filterReads2
+             if [ "$numFilt2Reads" -le $MAX_CLUSTER ]; then # default maximum number of Q12 filtered reads for clustering set to MAX_CLUSTER 
+               clusterConsensus2
+               treatClusters "${RUN_FOLDER}_WIMF/$BC_FOLDER"
+               HQSamples=$((HQSamples+1))
+               makeFilt2Report # make report for Filt3 samples
+               if [ ! -d "${RUN_FOLDER}_WIMF/Filt2Samples" ]; then # create folder if it doesn't exist
+                 mkdir "${RUN_FOLDER}_WIMF/Filt2Samples"
+               fi
+               if [ ! -d "${RUN_FOLDER}_WIMF/Filt2Samples/$BC_FOLDER" ]; then # create subfolder if it doesn't exist
+                 mkdir "${RUN_FOLDER}_WIMF/Filt2Samples/$BC_FOLDER" 
+               fi
+               mv "${RUN_FOLDER}_WIMF/$BC_FOLDER"/* "${RUN_FOLDER}_WIMF"/Filt2Samples/"$BC_FOLDER"
+               rm -r "${RUN_FOLDER}_WIMF/$BC_FOLDER" # remove the empty BC_FOLDER
+             else
+               filterReads3
+               if [ "$numFilt3Reads" -le $MAX_CLUSTER ]; then # default maximum number of filtered reads for clustering set to MAX_CLUSTER 
+                 clusterConsensus3
+                 treatClusters "${RUN_FOLDER}_WIMF/$BC_FOLDER"
+                 Filt3Samples=$((QFilt3Samples+1))
+                 makeFilt3Report # make report for >Filt3 samples
+                 if [ ! -d "${RUN_FOLDER}_WIMF/Filt3Samples" ]; then # create folder if it doesn't exist
+                  mkdir "${RUN_FOLDER}_WIMF/Filt3Samples"
+                 fi
+                 if [ ! -d "${RUN_FOLDER}_WIMF/Filt3Samples/$BC_FOLDER" ]; then # create subfolder if it doesn't exist
+                   mkdir "${RUN_FOLDER}_WIMF/Filt3Samples/$BC_FOLDER" 
+                 fi
+                 mv "${RUN_FOLDER}_WIMF/$BC_FOLDER"/* "${RUN_FOLDER}_WIMF/Filt3Samples/$BC_FOLDER"
+                 rm -r "${RUN_FOLDER}_WIMF/$BC_FOLDER" # remove the empty BC_FOLDER
+               else
+                 echo ""
+		 echo -e "$(red Despite filtering of reads with mean quality \>Q$FILTER3_QUALITY_THRESHOLD there are still too many reads \(\>$MAX_CLUSTER\) to do the clustering)"
+                 echo -e "$(red Consider lowering manually the cutoff if you have more than 8Gb of RAM or to set a higher quality threshold in NanoFilt to solve this)"
+                 echo ""
+               fi
+             fi
+           fi
+           #BLASTfiltReads
+           #formatBLASToutput
+           # uncomment to delete FASTQ file of all filtered sequences
+           # rm "${RUN_FOLDER}_o/$BC_FOLDER/02_Filt_NanoFilt/filtSeqs.fastq"
+         fi          
+       fi
+     else  # if earlyStop is true
+       unusedSamples=$((unusedSamples+1)) # increment by one each time there's a BC folder containing less than 10 raw reads
+     # echo $unusedSamples
+       echo -e "$( red End of analysis for $BC_FOLDER \(not enough raw reads to make raw data plot\))"
+       echo -e "$BC_FOLDER		Total number of raw reads = $totalNumReads" >> "${notUsedlog}"
+       echo ""
+     fi  
+    BCFTimeSecs="$(($(date +%s) - ${startTime}))"
+    BCFTime=$(convertPrintSeconds $BCFTimeSecs)        
+    echo -e "$(violet Time Elapsed for $BC_FOLDER : $BCFTime)"
+    echo ""
+    echo -e "\n\n\n\n"
+    fullTimeSecs=$(($fullTimeSecs+$BCFTimeSecs))
+   done
+if [ -f NanoFilt.log ]; then
+  rm NanoFilt.log # remove log generated by NanoFilt
+fi
+
+fullTime=$(convertPrintSeconds $fullTimeSecs)
+echo "************************************************************"
+echo "*****************$(bg_green   WIMF ANALYSIS FINISHED  )*********************"
+echo "****************$(bg_green Time Elapsed: $fullTime )*******************" 
+echo "************************************************************"
+echo ""
+
+
+if [ "$avgSamples" -ge 1 ] ;then # if there's at least one "typical" average BC sample 
+	echo -e "$avgSamples sample(s) went through the analysis with quality filter >Q$FILTER1_QUALITY_THRESHOLD (\"typical\" samples)"	
+        echo "These are stored in ${RUN_FOLDER}_WIMF/Filter1Samples" 
+fi
+if [ "$HQSamples" -ge 1 ] ;then # if there's at least one "very high quality" BC sample 
+	echo -e "$HQSamples sample(s) went through the analysis with quality filter >Q${FILTER2_QUALITY_THRESHOLD} (\"high quality\" samples)"	
+        echo "These are stored in ${RUN_FOLDER}_WIMF/Filter2Samples" 
+fi
+if [ "$Filt3Samples" -ge 1 ] ;then # if there's at least one "extremely high quality" BC sample 
+	echo -e "$Filt3Samples sample(s) went through the analysis with quality filter >Q${FILTER3_QUALITY_THRESHOLD} (\"very high quality\" samples)"	
+        echo "These are stored in ${RUN_FOLDER}_WIMF/Filter3Samples" 
+fi
+if [ "$lowFiltSamples" -ge 1 ] ;then # if there's at least one BC sample with less than $MIN_NUM_FILT_READS filtered reads (plots of raw+filtered data available but not used for further analysis)
+	echo -e "$lowFiltSamples sample(s) with less than $MIN_NUM_FILT2_READS filtered reads which were not analyzed (besides raw+filtered data statistics and plots), a complete list is available in the following file: "
+        echo -e "$lowFiltlog"	
+        echo "These are stored in ${RUN_FOLDER}_WIMF/LowFiltReadsSamples"
+        echo ""
+fi
+if [ "$lowRawSamples" -ge 1 ] ;then # if there's at least one BC sample with less than raw 200 reads (plots of raw data available but not used for further analysis)
+	echo -e "$lowRawSamples sample(s) with less than $MIN_NUM_RAW_READS raw reads which were not analyzed (besides raw data statistics and plots), a complete list is available in the following file: "
+        echo -e "$lowRawlog"
+        echo "These are stored in ${RUN_FOLDER}_WIMF/LowRawReadsSamples"	
+        echo ""
+fi
+if [ "$unusedSamples" -ge 1 ] ;then # if there's at least one BC sample with less than 10 raw reads (not used for further analysis)
+	echo -e "$unusedSamples sample(s) with less than 10 raw reads which were not analyzed, a complete list is available in the following file: "
+        echo -e "$notUsedlog"	
+        echo ""
+fi
+
+compactLog "${RUN_FOLDER}_WIMF/LOGS/WIMF.log"
