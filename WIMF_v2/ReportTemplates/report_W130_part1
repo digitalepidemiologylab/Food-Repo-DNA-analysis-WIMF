@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script src="HTML_files/Chart.min.js"></script>
+<meta charset="utf-8">
+<title>WIMF report</title></h1>
+</head>
+<center><h1><big>WIMF v2.0 Report</big></h1><center>
+<br></br>
+<center>
+<h1>Full report from sample BC_FOLDER (filter1)</h1>
+<h2>Sequencing run folder: SEQ_FOLDER</h2>
+<h2>Command used: FULL_USER_COMMAND</h2>
+<body>
+<h1>Total number of species detected = NUM_SPECIES_DETECTED</h1>
+<br></br>
+<h1>% of reads corresponding to each species <h1>
+<h3>(based on CLUSTER_READS reads from NUM_CLUSTERS clusters assigned to a species) </h3></center>
+<font color="red">
+<h2>WARNING: This analysis has at least one species with an unexpectedly low number of reads (<130)</h2></font>
+<h3>Do no trust results too much for species which have less than ~130 reads (This number was determined empirically from a single sequencing run of 96 samples so it is indicative). These are more likely to be an incorrect species assignment resulting from contamination of the DNA input material or from a wrong assignment due to a low number of sequencing reads. Having more reads allows to better correct the original sequencing errors. </h3>
+</font>
+
+<canvas id="bar-chart-horizontal" width="800" height="300"></canvas>
+<div id="SpeciesDNA"></div>
+	<!--[if IE]><script src="excanvas.js"></script><![endif]-->
+        
+	 <script>
+  new Chart(document.getElementById("bar-chart-horizontal"), {
+    type: 'horizontalBar',
+    data: {
+      labels: [SPECIES_NAMES],
+      datasets: [
+        {
+          label: "% of reads: ",
+          backgroundColor: [COLOR_TABLE],
+          data: [SPECIES_PERC]
+        }
+      ]
+    },
+    options: {
+      scales: {
+        yAxes: [{
+            barPercentage: 1.0,
+            categoryPercentage: 1.0,
+            ticks: {
+                fontSize: 24,
+                fontStyle: "italic"
+            }
+        }],
+        xAxes: [{
+             display: true,
+          ticks: {
+            beginAtZero: true,
+            fontSize: 24
+          },
+        }]},
+      legend: { display: false },
+    }
+});
+
+
+    </script>
+	<script>(function () {
+	
+		function createCanvas(divName) {
+			
+			var div = document.getElementById(divName);
+			var canvas = document.createElement('canvas');
+			div.appendChild(canvas);
+			if (typeof G_vmlCanvasManager != 'undefined') {
+				canvas = G_vmlCanvasManager.initElement(canvas);
+			}	
+			var ctx = canvas.getContext("2d");
+			return ctx;
+		}
+		
+		var ctx = createCanvas("SpeciesDNA");
+		var graph = new BarGraph(ctx);
+		graph.maxValue = 100;
+		graph.margin = 1;
+		graph.colors = [COLOR_TABLE];
+		graph.xAxisLabelArr = [SPECIES_NAMES];
+		setInterval(function () {
+			graph.update([SPECIES_PERC]);
+		}, 1000);
+		
+		
+		
+
+	}());</script>
+
+<h1>Species clusters summary statistics</h1>
+<table style="width:60%" border="1">
+  <tr>
+    <th>Species english name</th>
+    <th>Species latin name</th>
+    <th>Total number of reads</th>
+    <th>Number of clusters</th>
+    <th>% of identical matches*</th>
+    <th>Query coverage*</th>
+    <th>Query length*</th>
+    <th>Number of mismatches*</th>
+    <th>Number of gap openings*</th>
+    <th>E-value*</th>
+    <th>Bit Score*</th>
+    <th>Marker</th>
+    <th>Species marker contribution (%)</th>
+  </tr>

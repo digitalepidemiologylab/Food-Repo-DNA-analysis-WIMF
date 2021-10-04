@@ -1,0 +1,66 @@
+</table>
+<p>* weighted average from NCBI BLAST results across clusters for this species, with the number of reads per cluster as weight</p>
+<br></br>
+
+ <center><h1>Raw data summary statistics (NanoPlot)</h1>
+<table style="width:40%" border="1">
+  <tr>
+    <th>Metric</th>
+    <th>Value</th>
+  </tr>
+  <tr>
+    <td>Number of reads</td>
+    <td>numRawReads1</td>
+  </tr>
+  <tr>
+    <td>Average read quality</td>
+    <td>meanReadQ1</td>
+  </tr>
+  <tr>
+    <td>Average read length</td>
+    <td>meanReadLength1</td>
+  </tr>
+  <tr>
+    <td>Read length N50</td>
+    <td>readN501</td>
+  </tr>
+  <tr>
+    <td>Total number of nucleotides</td>
+    <td>totalBases1</td>
+  </tr>
+</table>
+<br></br>
+ <h1>Raw data plot (NanoPlot)</h1>
+<img src="PATH2RAWPLOT"alt="Length vs quality scatter plot of raw reads by NanoPlot" width=50%>
+<br></br>
+<h1>Data summary statistics after filter3 (NanoPlot)</h1>
+<table style="width:40%" border="1">
+  <tr>
+    <th>Metric</th>
+    <th>Value</th>
+  </tr>
+  <tr>
+    <td>Number of reads</td>
+    <td>numFiltReads4</td>
+  </tr>
+  <tr>
+    <td>Average read quality</td>
+    <td>meanReadQ4</td>
+  </tr>
+  <tr>
+    <td>Average read length</td>
+    <td>meanReadLength4</td>
+  </tr>
+  <tr>
+    <td>Read length N50</td>
+    <td>readN504</td>
+  </tr>
+  <tr>
+    <td>Total number of nucleotides</td>
+    <td>totalBases4</td>
+  </tr>
+</table>
+<h1>Data plot after filter3 (NanoPlot)</h1>
+<img src="PATH2FILTPLOT"alt="Length vs quality scatter plot of filtered reads by NanoPlot" width=50%></center>
+</body>
+</html>

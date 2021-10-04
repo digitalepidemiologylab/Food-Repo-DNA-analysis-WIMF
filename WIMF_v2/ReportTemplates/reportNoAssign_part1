@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script src="HTML_files/Chart.min.js"></script>
+<meta charset="utf-8">
+<title>WIMF report</title></h1>
+</head>
+<center><h1><big>WIMF v2.0 Report</big></h1><center>
+<br></br>
+<center>
+<h1>Full report from sample BC_FOLDER (filter1)</h1>
+<h2>Sequencing run folder: SEQ_FOLDER</h2>
+<h2>Command used: FULL_USER_COMMAND</h2>
+<body>
+<font color="red">
+<h2>WARNING: No species assignment could be made from the three gene markers (matK, rbcL and 16S rRNA genes). </h2>
+<h3>You may try to lower the BLAST identity cutoff (default 95%) and/or the query coverage cutoff (default 90%) to obtain species assignment results but these will be less reliable.
+You can try to manually BLAST online some of the filtered reads to have an idea of which sequences are present in this sample.</h3>
+<h3>It is possible that there was an issue during amplification or sequencing steps of the protocol for this sample. </h3>
+</font>
+

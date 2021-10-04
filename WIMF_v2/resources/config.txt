@@ -1,0 +1,70 @@
+# WIMF v2.0 Default values (DO NOT CHANGE FOR THIS VERSION)
+
+# AMPLICON SIZES 
+
+# Expected min amplicon size is 250 bp (without adapters), 230 to be conservative (-20)
+MIN_AMPLICON_LENGTH=230 
+
+# expected max amplicon size is 850 bp (without adapters), 870 to be conservative (+20)
+MAX_AMPLICON_LENGTH=870 
+
+# BLAST DATABASES TO BE USED 
+# The databases to be used. The matK and rbcL databases correspond to two different gene markers used for plants. BLAST results from matK and rbcL datbases are later combined to decide which species a sequence corresponds to.
+BLAST_DB_INDEX_16SmatKrbcL="${WIMF_INSTALL_PATH}/BLASTdbs/16SmatKrbcL"
+BLAST_DB_INDEX_RBCL="${WIMF_INSTALL_PATH}/BLASTdbs/rbcL"
+BLAST_DB_INDEX_MATK="${WIMF_INSTALL_PATH}/BLASTdbs/matK"
+BLAST_DB_INDEX_16S="${WIMF_INSTALL_PATH}/BLASTdbs/16S"
+
+# BLAST FILTER CUTOFFS
+# Mininumum identity between query sequence and BLAST hit in %
+BLAST_MIN_IDENTITY=95
+# Mininumum coverage between query sequence and BLAST hit in %
+BLAST_MIN_COVERAGE=88
+# When using a list of ingredients as input, search ingredient within all results which are greater than this percentage of the maximum BLAST bitscore obtained for the first hit
+BITSCORE_TOLERANCE=85
+
+# NOISE CUTOFF 
+# Once final species assignments are obtained, only keep species for which the percentage of reads relative to all assigned reads (including all species detected) is above this value. This is to remove species with very small number of reads, these can result from contaminations or sequencing errors leading to wrong species assignments.
+NOISE_CUTOFF=2 
+
+# CLUSTERING PARAMETERS FOR SEEKDEEP
+
+# Minimum identity between sequences to be assigned to the same cluster
+ID_THRESHOLD_CLUSTER=0.965
+
+# PHRED quality scores indicating SeekDeep what is considered high or low quality for the different read categories (1 corresponds to raw reads, 2 reads passing the first filter and 3 reads passing the third filter). 
+CLUSTER_QUALITY_THRESHOLD_HIGH1=10
+CLUSTER_QUALITY_THRESHOLD_POOR1=8
+CLUSTER_QUALITY_THRESHOLD_HIGH2=11
+CLUSTER_QUALITY_THRESHOLD_POOR2=9
+CLUSTER_QUALITY_THRESHOLD_HIGH3=11
+CLUSTER_QUALITY_THRESHOLD_POOR3=9 
+
+# QUALITY FILTERS AND MINIMUM NUMBER OF READS FOR PLOT
+
+# Filter quality PHRED score minimal value for consecutive filters (with FILTER1<FILTER2<FILTER3)
+FILTER1_QUALITY_THRESHOLD=10
+FILTER2_QUALITY_THRESHOLD=12
+FILTER3_QUALITY_THRESHOLD=13
+
+# Minimum number of reads to plot read length vs quality for each read category
+MIN_NUM_RAW_READS=200
+MIN_NUM_FILT1_READS=100
+MIN_NUM_FILT2_READS=100
+MIN_NUM_FILT3_READS=100
+
+# Once clusters are obtained, only keep those which are formed by at least this number of reads (a value of 2 or above eliminates "singletons"=clusters formed by a single read)
+READS_PER_CLUSTER_CUTOFF=1
+
+# HARDWARE RELATED 
+
+# Number or reads empirically determined to pass through SeekDeep qluster without causing memory limit error with 8Gb RAM 
+MAX_CLUSTER=10050  
+
+# Number of threads to use for BLAST
+THREADS_BLAST=4
+
+# Decide whether temporary files must be deleted when interrupting WIMF (0=no, 1=yes)
+ERASE_TMP_FILES=0
+
+
