@@ -1,7 +1,8 @@
 # What's in my food (WIMF) pipeline v1.0 and v2.0
 Author: Olivier Emery, Digital Epidemiology Lab (Ecole Polytechnique Fédérale de Lausanne - EPFL) 
 Campus Biotech Geneva, Switzerland
-date: August 26th 2019
+Date v1.0: August 26th 2019
+Date v2.0: December 23rd 2020
 
 # WIMF description
 
